@@ -1,0 +1,15 @@
+# 用户的本地知识库：可能含文章、图片、收藏、划线、订阅与日志，永不提交。
+data/*
+!data/.gitkeep
+
+# 本机微信读书订阅配置、额度状态及抓取结果。
+fetcher/config.json
+fetcher/data/
+
+# 系统与依赖产物。
+node_modules/
+**/node_modules/
+**/__pycache__/
+.DS_Store
+.env
+*.log
