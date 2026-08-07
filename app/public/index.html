@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      // 直接双击此文件时无法访问本地书库 API；统一回到阅读器服务。
+      if (location.protocol === 'file:') location.replace('http://localhost:8041/');
+    </script>
+    <title>We-Read</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#today" aria-label="回到首页"><span class="brand-mark">阅</span><span>We-Read</span></a>
+        <div class="top-actions">
+          <span id="sync-status" class="sync-status">更新状态载入中…</span>
+          <span id="job-status" class="job-status">准备就绪</span>
+          <button id="refresh-button" class="refresh-button">↻ 拉取更新</button>
+          <button id="settings-button" class="icon-button" aria-label="打开设置">⚙</button>
+        </div>
+      </header>
+      <section class="hero">
+        <h1>We-Read</h1>
+        <p id="library-meta" class="muted">正在载入书库…</p>
+      </section>
+      <nav class="tabs" aria-label="阅读视图">
+        <button data-tab="today" class="tab active">最近一天</button>
+        <button data-tab="favorites" class="tab">收藏待读</button>
+        <button data-tab="week" class="tab">最近 7 天</button>
+        <button data-tab="shelf" class="tab">全部书架</button>
+      </nav>
+      <section id="content" class="content" aria-live="polite"></section>
+    </main>
+    <dialog id="subscribe-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="subscribe-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">ADD A PUBLIC ACCOUNT</p>
+        <h2>添加公众号</h2>
+        <p>粘贴该公众号任意一篇文章链接。系统会在本机解析公众号身份、加入书架，并在下次刷新时抓取文章。</p>
+        <label>文章链接<input id="article-url" name="url" type="url" required placeholder="https://mp.weixin.qq.com/s/..." /></label>
+        <button class="primary-button" type="submit">解析并订阅</button>
+        <p id="subscribe-note" class="form-note"></p>
+      </form>
+    </dialog>
+    <dialog id="settings-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="settings-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">LOCAL SETTINGS</p>
+        <h2>抓取设置</h2>
+        <label>每日抓取上限<input id="max-runs" type="number" min="1" max="2" required /></label>
+        <label>账号请求间隔（毫秒）<input id="request-interval" type="number" min="1500" max="20000" step="500" required /></label>
+        <label>首次导入文章数量<input id="initial-limit" type="number" min="1" max="100" required /></label>
+        <p class="form-note">建议每天不超过 2 次；较低频率能减少微信读书触发验证的概率。</p>
+        <button class="primary-button" type="submit">保存设置</button>
+      </form>
+    </dialog>
+    <dialog id="remove-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="remove-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">REMOVE SUBSCRIPTION</p>
+        <h2 id="remove-title">停止订阅？</h2>
+        <p id="remove-note">停止后不会再拉取这个公众号。已下载的本地文章会默认保留。</p>
+        <label class="check-label"><input id="remove-archive" type="checkbox" />同时删除该公众号已下载的本地 Markdown 和图片</label>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="danger-button" type="submit">确认删除</button></div>
+      </form>
+    </dialog>
+    <dialog id="over-limit-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="over-limit-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">ONE MORE SYNC</p>
+        <h2>今日已达建议上限</h2>
+        <p id="over-limit-note">额外拉取更可能触发微信读书验证。确认后才会继续。</p>
+        <div class="modal-actions"><button class="secondary-button" type="button" data-close-dialog>暂不拉取</button><button class="danger-button" type="submit">仍要拉取</button></div>
+      </form>
+    </dialog>
+    <div id="toast" class="toast" role="status"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

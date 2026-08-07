@@ -1,0 +1,10 @@
+{
+  "name": "we-reader-app",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/library.test.mjs"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "_说明": "复制成 config.json 再改。config.json 已被 .gitignore 忽略,不会误提交。",
+
+  "_accounts": "要监控的公众号。跑 `node bin/weread.mjs --shelf` 可以列出你已订阅的号和它们的 bookId。",
+  "accounts": [],
+
+  "_readerUrl": "可留空。工具会自动从书架接口推导出阅读器页 URL,不需要你手动复制。只有在自动推导失败时才需要手工填。",
+  "readerUrl": "",
+
+  "_maxRunsPerDay": "每天最多抓几次。防风控用,别调太大。设 0 表示不限制(不推荐)。",
+  "maxRunsPerDay": 2,
+
+  "_requestIntervalMs": "每个公众号之间的间隔毫秒数。别调到 1000 以下。",
+  "requestIntervalMs": 3000,
+
+  "_initialArticleLimit": "一个首次加入、尚无本地历史的公众号最多抓多少篇。默认 50。",
+  "initialArticleLimit": 50,
+
+  "_maxIncrementalPages": "已有历史的公众号最多往后翻几页，直到碰到上次最新文章。高频号可适度调大。",
+  "maxIncrementalPages": 8,
+
+  "_chromePort": "留空则自动从 Chrome 的 DevToolsActivePort 文件里读。手动指定时填 9222 这类端口号。",
+  "chromePort": null,
+
+  "_statePath": "每日次数记录存放位置,不进仓库。",
+  "statePath": "~/.weread-mp-fetcher/quota.json"
+}
