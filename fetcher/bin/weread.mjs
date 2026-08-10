@@ -48,6 +48,8 @@ function loadConfig() {
   cfg.requestIntervalMs = cfg.requestIntervalMs ?? 3000;
   cfg.initialArticleLimit = cfg.initialArticleLimit ?? 50;
   cfg.maxIncrementalPages = cfg.maxIncrementalPages ?? 8;
+  // Chrome 136+ 不再接受默认 profile 的远程调试；We-Read 的启动脚本固定使用 9222。
+  cfg.chromePort = cfg.chromePort ?? 9222;
   cfg.libraryPath = cfg.libraryPath || path.resolve(ROOT, '..', 'data', '数据', 'library.json');
   cfg.accounts = cfg.accounts || [];
   return cfg;
@@ -186,6 +188,17 @@ function toMarkdown(sources) {
   return lines.join('\n');
 }
 
+function emitCompletion(result) {
+  // app/server.mjs 读取这条结构化结果；普通日志仍保留给命令行排障。
+  console.error(`WE_READER_RESULT:${JSON.stringify(result)}`);
+}
+
+function readArchiveSummary(stdout = '') {
+  const match = String(stdout).match(/WE_READER_ARCHIVE_SUMMARY:(\{[^\n]+\})/);
+  if (!match) return null;
+  try { return JSON.parse(match[1]); } catch { return null; }
+}
+
 async function main() {
   const cfg = loadConfig();
 
@@ -315,7 +328,9 @@ async function main() {
       JSON.stringify({ fetchedAt: new Date().toISOString(), ...result }, null, 2) + '\n',
       'utf8'
     );
-    // 成功抓取后同步 Second Brain 的长期书库；同步失败不影响本次抓取结果。
+    // 成功抓取后同步长期书库和本地 Markdown。任何一步失败都必须传给网页，
+    // 不能把“目录抓到了、正文没归档”误报为同步完成。
+    let completion = null;
     const exportResult = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'export-second-brain.mjs')], {
       cwd: ROOT,
       encoding: 'utf8',
@@ -327,17 +342,39 @@ async function main() {
         encoding: 'utf8',
       });
       if (archiveResult.status === 0) {
-        const summary = archiveResult.stdout.trim().split('\n').slice(-6).join(' ');
-        console.error(`Second Brain Markdown 归档已更新。${summary}`);
+        const summary = readArchiveSummary(archiveResult.stdout);
+        if (!summary) {
+          completion = { outcome: 'failed', stage: 'archive', message: '正文归档没有返回有效结果；书库未标记为同步完成。' };
+          console.error(`Second Brain Markdown 自动归档失败：${completion.message}`);
+        } else if (summary.failed > 0) {
+          completion = {
+            outcome: 'partial', stage: 'archive',
+            message: `目录已更新，但有 ${summary.failed} 篇正文未能归档。`, archive: summary,
+          };
+          console.error(`Second Brain Markdown 归档部分完成：成功 ${summary.archived}，失败 ${summary.failed}。`);
+        } else {
+          console.error(`Second Brain Markdown 归档已更新：新增 ${summary.archived}，已存在 ${summary.skipped}。`);
+        }
       } else {
-        console.error(`Second Brain Markdown 自动归档失败：${archiveResult.stderr?.trim() || '未知错误'}`);
+        completion = { outcome: 'failed', stage: 'archive', message: `正文归档失败：${archiveResult.stderr?.trim() || '未知错误'}` };
+        console.error(`Second Brain Markdown 自动归档失败：${completion.message}`);
       }
     } else {
-      console.error(`Second Brain 自动导出失败：${exportResult.stderr?.trim() || '未知错误'}`);
+      completion = { outcome: 'failed', stage: 'export', message: `书库导出失败：${exportResult.stderr?.trim() || '未知错误'}` };
+      console.error(`Second Brain 自动导出失败：${completion.message}`);
     }
     console.log(has('--format') && val('--format') === 'md' ? toMarkdown(result.sources) : JSON.stringify(result, null, 2));
     if (failed.length) {
       console.error(`\n注意:${failed.length} 个公众号抓取失败(${failed.map((f) => f.name).join('、')})`);
+      if (!completion) completion = {
+        outcome: 'partial', stage: 'directory',
+        message: `有 ${failed.length} 个公众号未能拉取，其他内容已完成同步。`,
+        failedSources: failed.map((item) => item.name),
+      };
+    }
+    if (completion) {
+      emitCompletion(completion);
+      process.exitCode = completion.outcome === 'partial' ? 4 : 1;
     }
   } finally {
     session.close();

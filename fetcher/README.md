@@ -39,14 +39,13 @@ node bin/weread.mjs --format md
 ### 上手路径（详细步骤见下一节）
 
 ```
-① git clone + cp config.example.json config.json
-② 用 --remote-debugging-port=9222 启动 Chrome（先完全退出原来的）
-③ 在这个 Chrome 里扫码登录微信读书        ← 全程唯一需要你动手的一步
+① 从 We-Read 根目录运行 ./scripts/start-chrome-debug.sh
+② 在 We-Read 专用 Chrome 中扫码登录微信读书 ← 全程唯一需要你动手的一步
 ④ node bin/weread.mjs --add <文章链接>     ← 书架空的才需要
 ⑤ 填 config.json → node bin/weread.mjs --format md
 ```
 
-**前置条件**：Node.js 18+（零第三方依赖，不用 `npm install`）、桌面版 Chrome、一个微信号。
+**前置条件**：Node.js 18+（零第三方依赖，不用 `npm install`）、Python 3.11+（正文归档，转换器已随仓库提供）、桌面版 Chrome、一个微信号。
 
 ### ⚠️ 局限（先知道，别踩坑）
 
@@ -87,37 +86,27 @@ node bin/weread.mjs --format md
 
 ### 第 1 步：装上
 
+请从仓库根目录启动完整应用：
+
 ```bash
-git clone https://github.com/Pengyf04/weread-mp-fetcher.git
-cd weread-mp-fetcher
-cp config.example.json config.json
+git clone https://github.com/leafsun888-sketch/we-reader.git
+cd we-reader
+./start.sh --check
+./scripts/start-chrome-debug.sh
+./start.sh
 ```
 
 ### 第 2 步：让 Chrome 开着调试端口
 
-工具需要在**你已登录的那个 Chrome** 里执行 JS，所以要用调试端口启动它。
+工具需要在一个已登录的 Chrome 中执行 JS。Chrome 136+ 要求调试 Chrome 使用**非默认**用户数据目录；旧版“关闭 Chrome 后直接加端口”的方式已不再适用。
 
-> ⚠️ **先把 Chrome 完全退出**（`Cmd+Q` / 任务管理器里结束掉），否则新参数不生效。
-
-**macOS**
+macOS 使用仓库脚本：
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+./scripts/start-chrome-debug.sh
 ```
 
-**Windows**（PowerShell）
-
-```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-```
-
-**Linux**
-
-```bash
-google-chrome --remote-debugging-port=9222
-```
-
-用你**平时那个 Chrome 配置**打开就行，登录状态都在。不要加 `--user-data-dir` 指向新目录，那等于开了一个没登录过的浏览器。
+它会用 `--remote-debugging-port=9222` 以及 `data/chrome-debug-profile` 启动隔离窗口。请在这个窗口重新登录微信读书；不要把日常 Chrome profile 暴露给调试端口。
 
 > 调试端口只监听 `127.0.0.1`，外部访问不到。但开着它意味着本机程序都能控制这个 Chrome，介意的话用完正常重启一次 Chrome 即可。
 
@@ -246,7 +235,7 @@ $ node bin/weread.mjs
 不能。微信读书网页端搜不到公众号（实测 `/web/search/global` 加 `type`/`scope` 等参数返回的都是书；MP 专用端点全 404）。用 `--add <文章链接>` 代替，效果一样且更可靠。
 
 **找不到 Chrome 调试端口**
-确认启动 Chrome 时带了 `--remote-debugging-port=9222`，并且启动前已经**完全退出**了原来的 Chrome。也可以在 `config.json` 里显式写 `"chromePort": 9222`。
+先运行 `./scripts/start-chrome-debug.sh`，确认在它打开的专用窗口中登录微信读书。Chrome 136+ 必须同时使用 `--remote-debugging-port=9222` 和非默认 `--user-data-dir`；也可在 `config.json` 中显式写 `"chromePort": 9222`。
 
 ---
 

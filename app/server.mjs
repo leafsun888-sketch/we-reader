@@ -7,14 +7,15 @@ import { spawn } from 'node:child_process';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT = path.resolve(ROOT, '..');
 const PUBLIC = path.join(ROOT, 'public');
-const DATA = path.join(PROJECT, 'data');
-const FETCHER = path.join(PROJECT, 'fetcher');
+const DATA = path.resolve(process.env.WE_READER_DATA_DIR || path.join(PROJECT, 'data'));
+const FETCHER = path.resolve(process.env.WE_READER_FETCHER_DIR || path.join(PROJECT, 'fetcher'));
 const LIBRARY = path.join(DATA, '数据', 'library.json');
 const FAVORITES = path.join(DATA, '数据', 'favorites.json');
 const ANNOTATIONS = path.join(DATA, '数据', 'annotations.json');
 const ARCHIVE_STATUS = path.join(DATA, '数据', 'archive-status.json');
 const CONFIG = path.join(FETCHER, 'config.json');
 const CONFIG_TEMPLATE = path.join(FETCHER, 'config.example.json');
+const FETCHER_BIN = path.resolve(process.env.WE_READER_FETCHER_BIN || path.join(FETCHER, 'bin', 'weread.mjs'));
 const QUOTA = path.join(FETCHER, 'data', 'quota.json');
 const LATEST = path.join(FETCHER, 'data', 'latest.json');
 const RECOMMENDED_DAILY_LIMIT = 2;
@@ -74,10 +75,16 @@ const ensureFetcherConfig = async () => {
   });
 };
 
+const completionFromOutput = (output) => {
+  const results = [...String(output).matchAll(/WE_READER_RESULT:(\{[^\n]+\})/g)];
+  if (!results.length) return null;
+  try { return JSON.parse(results.at(-1)[1]); } catch { return null; }
+};
+
 function runFetcher(kind, args) {
   if (job.status === 'running') throw new Error('已有任务正在执行，请等待完成');
   job = { status: 'running', kind, message: kind === 'refresh' ? '正在连接微信读书并拉取文章…' : '正在解析文章链接并加入书架…', startedAt: new Date().toISOString(), finishedAt: null, output: '' };
-  const child = spawn(process.execPath, [path.join(FETCHER, 'bin', 'weread.mjs'), ...args], { cwd: FETCHER, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [FETCHER_BIN, ...args], { cwd: FETCHER, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   const append = (chunk) => { output = (output + chunk.toString()).slice(-12000); job.output = output; };
   child.stdout.on('data', append);
@@ -85,10 +92,13 @@ function runFetcher(kind, args) {
   const done = new Promise((resolve, reject) => {
     child.on('error', reject);
     child.on('close', (code) => {
+      const completion = completionFromOutput(output);
+      const status = completion?.outcome === 'partial' ? 'partial' : code === 0 ? 'success' : 'failed';
+      const defaultMessage = kind === 'refresh' ? '同步完成，书库与本地正文已更新。' : '公众号已加入书架。';
       job = {
         ...job,
-        status: code === 0 ? 'success' : 'failed',
-        message: code === 0 ? (kind === 'refresh' ? '同步完成，书库已更新。' : '公众号已加入书架。') : '任务未完成，请查看提示。',
+        status,
+        message: completion?.message || (status === 'success' ? defaultMessage : '任务未完成，请查看提示。'),
         finishedAt: new Date().toISOString(),
         output,
       };

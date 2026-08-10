@@ -265,7 +265,8 @@ export async function connectChrome(opts = {}) {
   if (!port) {
     throw new Error(
       '找不到 Chrome 的调试端口。请用 --remote-debugging-port=9222 启动 Chrome,\n' +
-        '或在配置里显式写上 chromePort。详见 README「启动 Chrome」一节。'
+        'Chrome 136+ 还必须使用非默认的 --user-data-dir。请运行 ./scripts/start-chrome-debug.sh，\n' +
+        '或在配置里显式写上 chromePort。详见 README「连接微信读书」一节。'
     );
   }
 

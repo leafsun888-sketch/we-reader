@@ -9,7 +9,7 @@ button { color:inherit; }
 .brand-mark { width:30px; height:30px; display:grid; place-items:center; background:var(--ink); color:var(--paper); border-radius:8px; font-size:15px; }
 .brand-subtitle { color:var(--muted); font-family:ui-sans-serif,system-ui,sans-serif; font-size:12px; letter-spacing:.08em; text-transform:uppercase; }
 .top-actions { margin-left:auto; display:flex; align-items:center; gap:10px; font-family:ui-sans-serif,system-ui,sans-serif; }.sync-status { color:var(--muted); font-size:12px; white-space:nowrap; }
-.job-status { max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }.job-status.working { color:var(--accent); font-weight:700; }
+.job-status { max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }.job-status.working { color:var(--accent); font-weight:700; }.job-status.attention { color:#b54708; font-weight:700; }
 .refresh-button,.primary-button,.icon-button { border:0; cursor:pointer; font-family:ui-sans-serif,system-ui,sans-serif; font-weight:750; }.refresh-button { padding:10px 13px; border-radius:8px; background:var(--ink); color:var(--paper); font-size:13px; }.refresh-button:hover,.primary-button:hover { background:var(--accent); }.refresh-button:disabled,.primary-button:disabled { opacity:.58; cursor:wait; }.icon-button { width:37px; height:37px; border:1px solid var(--line); border-radius:8px; background:transparent; font-size:17px; }.icon-button:hover { background:#f0eade; }
 .hero { padding:58px 0 36px; max-width:680px; }
 .eyebrow { margin:0 0 10px; color:var(--accent); font-family:ui-sans-serif,system-ui,sans-serif; font-size:11px; letter-spacing:.15em; font-weight:800; }

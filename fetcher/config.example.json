@@ -19,9 +19,9 @@
   "_maxIncrementalPages": "已有历史的公众号最多往后翻几页，直到碰到上次最新文章。高频号可适度调大。",
   "maxIncrementalPages": 8,
 
-  "_chromePort": "留空则自动从 Chrome 的 DevToolsActivePort 文件里读。手动指定时填 9222 这类端口号。",
-  "chromePort": null,
+  "_chromePort": "默认使用 We-Read 专用 Chrome 的调试端口。请先运行 ./scripts/start-chrome-debug.sh；Chrome 136+ 必须使用非默认 user-data-dir。",
+  "chromePort": 9222,
 
-  "_statePath": "每日次数记录存放位置,不进仓库。",
-  "statePath": "~/.weread-mp-fetcher/quota.json"
+  "_statePath": "每日次数记录存放位置，保留在项目内且不进仓库。",
+  "statePath": "data/quota.json"
 }

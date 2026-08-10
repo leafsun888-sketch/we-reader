@@ -5,7 +5,6 @@
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
@@ -19,7 +18,6 @@ const PYTHON = process.env.WE_READER_PYTHON || 'python3';
 const readerCandidates = [
   process.env.WE_READER_READGZH,
   path.join(ROOT, 'vendor', 'readgzh.py'),
-  path.join(os.homedir(), '.codex', 'skills', 'readgzh', 'scripts', 'readgzh.py'),
 ].filter(Boolean);
 const READER = readerCandidates.find((candidate) => existsSync(candidate));
 const argv = process.argv.slice(2);
@@ -50,7 +48,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const isInvalidWechatExport = (markdown) => /^---[\s\S]*?title:\s*"WeChat Article"[\s\S]*?---[\s\S]*(?:参数错误|String\.prototype\.html)/m.test(markdown);
 
 const library = JSON.parse(await fs.readFile(LIBRARY, 'utf8'));
-if (!READER) throw new Error('找不到 readgzh.py。请设置 WE_READER_READGZH=/path/to/readgzh.py 后重试。');
+if (!READER) throw new Error('找不到正文转换器 fetcher/vendor/readgzh.py。请重新克隆完整仓库，或设置 WE_READER_READGZH=/path/to/readgzh.py。');
 const articles = library.sources.flatMap((source) => source.items.map((item) => ({ ...item, account: source.name })))
   .sort((a, b) => b.t - a.t);
 await fs.mkdir(ARCHIVE, { recursive: true });
@@ -100,4 +98,5 @@ for (const article of articles) {
   await sleep(900);
 }
 
-console.log(JSON.stringify({ archived, skipped, failed, archive: ARCHIVE }, null, 2));
+// 供 weread.mjs 精确读取；不要仅凭进程退出码把正文失败误报为“同步完成”。
+console.log(`WE_READER_ARCHIVE_SUMMARY:${JSON.stringify({ archived, skipped, failed, archive: ARCHIVE })}`);

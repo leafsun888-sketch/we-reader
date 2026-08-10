@@ -30,6 +30,7 @@ function notify(message, kind = 'normal') {
 function jobLabel(job) {
   if (job.status === 'running') return job.kind === 'refresh' ? '正在拉取并归档…' : '正在解析订阅…';
   if (job.status === 'failed') return '上次任务未完成';
+  if (job.status === 'partial') return '同步部分完成';
   if (job.status === 'success') return '同步完成';
   return '准备就绪';
 }
@@ -40,8 +41,11 @@ function updateHeader() {
   const runsToday = sync.runsToday ?? 0;
   const reachedLimit = maxRuns > 0 && runsToday >= maxRuns;
   syncStatus.textContent = `上次更新：${fullDt(sync.lastSuccessAt)} · 今日拉取：${runsToday}/${maxRuns} 次`;
-  jobStatus.textContent = jobLabel(state.management.job || {});
-  jobStatus.className = `job-status ${running ? 'working' : ''}`;
+  const currentJob = state.management.job || {};
+  const needsAttention = currentJob.status === 'failed' || currentJob.status === 'partial';
+  jobStatus.textContent = needsAttention && currentJob.message ? `${jobLabel(currentJob)}：${currentJob.message}` : jobLabel(currentJob);
+  jobStatus.title = currentJob.message || '';
+  jobStatus.className = `job-status ${running ? 'working' : ''}${needsAttention ? ' attention' : ''}`;
   refreshButton.disabled = running;
   refreshButton.title = reachedLimit ? `今日已拉取 ${runsToday}/${maxRuns} 次，点击后需要再次确认` : '';
   refreshButton.textContent = running ? '↻ 正在拉取…' : reachedLimit ? '↻ 仍要拉取' : '↻ 拉取更新';
@@ -171,7 +175,11 @@ async function refreshManagement({ reloadLibrary = false } = {}) {
   const priorStatus = state.management.job?.status;
   state.management = await response.json();
   updateHeader();
-  if (reloadLibrary && priorStatus === 'running' && state.management.job?.status === 'success') { await loadData(); render(); notify('同步完成，书架已更新。', 'success'); }
+  if (reloadLibrary && priorStatus === 'running' && ['success', 'partial'].includes(state.management.job?.status)) {
+    await loadData(); render();
+    const current = state.management.job;
+    notify(current.status === 'partial' ? current.message : '同步完成，书架与本地正文已更新。', current.status === 'partial' ? 'error' : 'success');
+  }
 }
 async function toggleFavorite(id) {
   if (state.favorites.has(id)) state.favorites.delete(id); else state.favorites.add(id);
