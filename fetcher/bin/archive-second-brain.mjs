@@ -7,6 +7,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { normalizeWechatArticleUrl } from '../lib/wechat-url.mjs';
+import { isWechatSource } from '../lib/source-platform.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const VAULT_ROOT = path.resolve(ROOT, '..', 'data');
@@ -14,15 +16,13 @@ const LIBRARY = path.join(VAULT_ROOT, '数据', 'library.json');
 const ARCHIVE = path.join(VAULT_ROOT, '文章');
 const STAGING = path.join(VAULT_ROOT, '.incoming');
 const STATUS = path.join(VAULT_ROOT, '数据', 'archive-status.json');
-const PYTHON = process.env.WE_READER_PYTHON || 'python3';
-const readerCandidates = [
-  process.env.WE_READER_READGZH,
-  path.join(ROOT, 'vendor', 'readgzh.py'),
-].filter(Boolean);
-const READER = readerCandidates.find((candidate) => existsSync(candidate));
+const PYTHON = process.env.WE_READ_PYTHON || process.env.PYTHON || 'python3';
+const READER = process.env.READGZH_SCRIPT || path.join(ROOT, 'vendor', 'readgzh.py');
 const argv = process.argv.slice(2);
 const indexOf = argv.indexOf('--limit');
 const limit = indexOf >= 0 ? Number(argv[indexOf + 1]) : 0;
+const articleIdIndex = argv.indexOf('--article-id');
+const requestedArticleId = articleIdIndex >= 0 ? String(argv[articleIdIndex + 1] || '') : '';
 
 const safe = (value) => String(value || 'untitled')
   .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
@@ -46,26 +46,38 @@ const run = (command, args) => new Promise((resolve) => {
 });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const isInvalidWechatExport = (markdown) => /^---[\s\S]*?title:\s*"WeChat Article"[\s\S]*?---[\s\S]*(?:参数错误|String\.prototype\.html)/m.test(markdown);
+const archivePaths = (article) => {
+  const filename = `${day(article.t)} ${safe(article.title)}`;
+  const targetDir = path.join(ARCHIVE, safe(article.account), filename);
+  return { filename, targetDir, targetMd: path.join(targetDir, `${filename}.md`) };
+};
+const emitProgress = (completed, total, archived, failed) => {
+  console.error(`WE_READ_ARCHIVE_PROGRESS ${JSON.stringify({ completed, total, archived, failed })}`);
+};
 
 const library = JSON.parse(await fs.readFile(LIBRARY, 'utf8'));
-if (!READER) throw new Error('找不到正文转换器 fetcher/vendor/readgzh.py。请重新克隆完整仓库，或设置 WE_READER_READGZH=/path/to/readgzh.py。');
-const articles = library.sources.flatMap((source) => source.items.map((item) => ({ ...item, account: source.name })))
+const articles = library.sources
+  .filter(isWechatSource)
+  .flatMap((source) => source.items.map((item) => ({
+    ...item,
+    url: normalizeWechatArticleUrl(item.url),
+    account: source.name,
+  })))
   .sort((a, b) => b.t - a.t);
 await fs.mkdir(ARCHIVE, { recursive: true });
 await fs.mkdir(STAGING, { recursive: true });
 let status = existsSync(STATUS) ? JSON.parse(await fs.readFile(STATUS, 'utf8')) : { archived: {}, failures: {} };
-let archived = 0, skipped = 0, failed = 0;
+const pendingArticles = articles.filter((article) => !existsSync(archivePaths(article).targetMd));
+const selectedArticles = requestedArticleId
+  ? pendingArticles.filter((article) => (article.rid || article.url) === requestedArticleId)
+  : pendingArticles;
+const queue = limit > 0 ? selectedArticles.slice(0, limit) : selectedArticles;
+let archived = 0, skipped = articles.length - pendingArticles.length, failed = 0, completed = 0;
+emitProgress(completed, queue.length, archived, failed);
 
-for (const article of articles) {
-  if (limit > 0 && archived + failed >= limit) break;
-  const filename = `${day(article.t)} ${safe(article.title)}`;
-  const targetDir = path.join(ARCHIVE, safe(article.account), filename);
-  const targetMd = path.join(targetDir, `${filename}.md`);
+for (const article of queue) {
+  const { targetDir, targetMd } = archivePaths(article);
   const key = article.rid || article.url;
-  if (existsSync(targetMd)) {
-    skipped += 1;
-    continue;
-  }
   const tempRoot = path.join(STAGING, safe(key));
   await fs.mkdir(tempRoot, { recursive: true });
   console.log(`下载 ${article.account} · ${article.title}`);
@@ -95,8 +107,9 @@ for (const article of articles) {
   }
   status.updatedAt = new Date().toISOString();
   await fs.writeFile(STATUS, JSON.stringify(status, null, 2) + '\n', 'utf8');
+  completed += 1;
+  emitProgress(completed, queue.length, archived, failed);
   await sleep(900);
 }
 
-// 供 weread.mjs 精确读取；不要仅凭进程退出码把正文失败误报为“同步完成”。
-console.log(`WE_READER_ARCHIVE_SUMMARY:${JSON.stringify({ archived, skipped, failed, archive: ARCHIVE })}`);
+console.log(JSON.stringify({ archived, skipped, failed, archive: ARCHIVE }, null, 2));

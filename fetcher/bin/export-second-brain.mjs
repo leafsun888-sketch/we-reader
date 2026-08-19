@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeWechatArticleUrl } from '../lib/wechat-url.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INPUT = path.join(ROOT, 'data', 'latest.json');
@@ -14,7 +15,12 @@ if (!fs.existsSync(INPUT)) {
   process.exit(2);
 }
 
-const data = JSON.parse(fs.readFileSync(INPUT, 'utf8'));
+const inputData = JSON.parse(fs.readFileSync(INPUT, 'utf8'));
+const normalizeSource = (source) => ({
+  ...source,
+  items: (source.items || []).map((item) => ({ ...item, url: normalizeWechatArticleUrl(item.url) })),
+});
+const data = { ...inputData, sources: (inputData.sources || []).map(normalizeSource) };
 const fetchedAt = new Date(data.fetchedAt);
 const format = (date, options) => new Intl.DateTimeFormat('zh-CN', {
   timeZone: 'Asia/Shanghai',
@@ -57,7 +63,7 @@ const libraryPath = path.join(OUTPUT, '数据', 'library.json');
 const existingLibrary = fs.existsSync(libraryPath)
   ? JSON.parse(fs.readFileSync(libraryPath, 'utf8'))
   : { sources: [] };
-const oldSources = new Map((existingLibrary.sources || []).map((source) => [source.bookId, source]));
+const oldSources = new Map((existingLibrary.sources || []).map(normalizeSource).map((source) => [source.bookId, source]));
 for (const source of data.sources) {
   const previous = oldSources.get(source.bookId) || { ...source, items: [] };
   const itemById = new Map((previous.items || []).map((item) => [item.rid || item.url, item]));

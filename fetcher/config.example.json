@@ -2,7 +2,10 @@
   "_说明": "复制成 config.json 再改。config.json 已被 .gitignore 忽略,不会误提交。",
 
   "_accounts": "要监控的公众号。跑 `node bin/weread.mjs --shelf` 可以列出你已订阅的号和它们的 bookId。",
-  "accounts": [],
+  "accounts": [
+    { "name": "示例公众号一", "bookId": "MP_WXS_0000000000" },
+    { "name": "示例公众号二", "bookId": "MP_WXS_1111111111" }
+  ],
 
   "_readerUrl": "可留空。工具会自动从书架接口推导出阅读器页 URL,不需要你手动复制。只有在自动推导失败时才需要手工填。",
   "readerUrl": "",
@@ -19,9 +22,13 @@
   "_maxIncrementalPages": "已有历史的公众号最多往后翻几页，直到碰到上次最新文章。高频号可适度调大。",
   "maxIncrementalPages": 8,
 
-  "_chromePort": "默认使用 We-Read 专用 Chrome 的调试端口。请先运行 ./scripts/start-chrome-debug.sh；Chrome 136+ 必须使用非默认 user-data-dir。",
+  "_chromePort": "留空则自动从 Chrome 的 DevToolsActivePort 文件里读。手动指定时填 9222 这类端口号。",
   "chromePort": 9222,
 
-  "_statePath": "每日次数记录存放位置，保留在项目内且不进仓库。",
-  "statePath": "data/quota.json"
+  "_chromeProfileDir": "Chrome 136+ 要求远程调试使用独立资料目录。填写后，点击网页拉取按钮会自动启动专用 Chrome，首次只需登录一次微信读书。",
+  "chromeProfileDir": "../data/浏览器/chrome-weread",
+  "autoLaunchChrome": true,
+
+  "_statePath": "每日次数记录存放位置,不进仓库。",
+  "statePath": "~/.weread-mp-fetcher/quota.json"
 }

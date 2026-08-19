@@ -86,10 +86,12 @@ export function buildFetchJs(accounts, intervalMs = 3000, options = {}) {
       (grp.subReviews || []).forEach(function(s){
         var r = s.review || {}, mi = r.mpInfo || {};
         if (!mi.title) return;
+        // 微信读书把微信短链里的下划线转义为波浪号；直接拼接会得到微信 ret=-2 参数错误页。
+        var originalId = String(mi.originalId || '').replace(/~/g, '_');
         out.push({
           t: r.createTime || grp.createTime || 0,
           title: mi.title,
-          url: mi.originalId ? ('https://mp.weixin.qq.com/s/' + mi.originalId) : '',
+          url: originalId ? ('https://mp.weixin.qq.com/s/' + originalId) : '',
           rid: r.reviewId || ''
         });
       });
