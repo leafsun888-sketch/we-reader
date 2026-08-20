@@ -12,6 +12,8 @@ import vm from 'node:vm';
 import { PROBE_JS, buildFetchJs, LIST_SHELF_JS } from '../lib/scripts.mjs';
 import { extractBiz, bizToBookId, resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
+import { normalizeWechatArticleUrl } from '../lib/wechat-url.mjs';
+import { isWechatSource, sourcePlatform } from '../lib/source-platform.mjs';
 
 let passed = 0;
 const ok = (msg) => {
@@ -119,7 +121,7 @@ const groups = {
       createTime: 100,
       subReviews: [
         { review: { createTime: 100, reviewId: 'r1', mpInfo: { title: '第一篇', originalId: 'AAA' } } },
-        { review: { createTime: 100, reviewId: 'r2', mpInfo: { title: '第二篇', originalId: 'BBB' } } },
+        { review: { createTime: 100, reviewId: 'r2', mpInfo: { title: '第二篇', originalId: 'BB~B' } } },
       ],
     },
   ],
@@ -138,6 +140,27 @@ const out = JSON.parse(
 assert.equal(out.sources[0].items.length, 2, '同一次群发的两篇都要取到');
 assert.equal(out.sources[0].items[0].url, 'https://mp.weixin.qq.com/s/AAA');
 ok('一次群发含多篇时全部展开,原文链接拼接正确');
+assert.equal(out.sources[0].items[1].url, 'https://mp.weixin.qq.com/s/BB_B');
+ok('微信读书 originalId 中的 ~ 会还原成微信短链使用的 _');
+
+assert.equal(
+  normalizeWechatArticleUrl('https://mp.weixin.qq.com/s/9k90m7chxxags~gtpZN9nQ'),
+  'https://mp.weixin.qq.com/s/9k90m7chxxags_gtpZN9nQ'
+);
+assert.equal(
+  normalizeWechatArticleUrl('https://example.com/s/a~b'),
+  'https://example.com/s/a~b'
+);
+ok('历史 URL 修复只作用于 mp.weixin.qq.com/s/ 短链');
+
+// ---------- 多来源归档边界 ----------
+console.log('多来源归档边界');
+assert.equal(sourcePlatform({}), 'wechat');
+assert.equal(isWechatSource({ name: '老数据' }), true, '旧公众号来源没有 platform 时仍按 wechat 处理');
+assert.equal(isWechatSource({ platform: 'wechat' }), true);
+assert.equal(isWechatSource({ platform: 'twitter' }), false, 'Twitter 不得交给公众号归档器');
+assert.equal(isWechatSource({ platform: 'youtube' }), false, 'YouTube 不得交给公众号归档器');
+ok('公众号归档器只接收 wechat 来源');
 
 // ---------- bookId 推导 ----------
 console.log('bookId 推导');

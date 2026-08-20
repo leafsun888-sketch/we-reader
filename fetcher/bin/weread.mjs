@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { connectChrome, listTabs, createTab, evaluate } from '../lib/cdp.mjs';
 import { PROBE_JS, buildFetchJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
@@ -29,6 +29,29 @@ const val = (f, d) => {
   const i = argv.indexOf(f);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : d;
 };
+const runArchiveWithProgress = () => new Promise((resolve) => {
+  const child = spawn(process.execPath, [path.join(ROOT, 'bin', 'archive-second-brain.mjs')], {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '', stderr = '', stderrLines = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString();
+    stderr += text;
+    stderrLines += text;
+    const lines = stderrLines.split(/\r?\n/);
+    stderrLines = lines.pop() || '';
+    for (const line of lines) {
+      if (line.startsWith('WE_READ_ARCHIVE_PROGRESS ')) process.stderr.write(`${line}\n`);
+    }
+  });
+  child.on('error', (error) => resolve({ status: -1, stdout, stderr: `${stderr}${error.message}` }));
+  child.on('close', (code) => {
+    if (stderrLines.startsWith('WE_READ_ARCHIVE_PROGRESS ')) process.stderr.write(`${stderrLines}\n`);
+    resolve({ status: code, stdout, stderr });
+  });
+});
 
 function loadConfig() {
   const file = path.resolve(val('--config', path.join(ROOT, 'config.json')));
@@ -48,9 +71,12 @@ function loadConfig() {
   cfg.requestIntervalMs = cfg.requestIntervalMs ?? 3000;
   cfg.initialArticleLimit = cfg.initialArticleLimit ?? 50;
   cfg.maxIncrementalPages = cfg.maxIncrementalPages ?? 8;
-  // Chrome 136+ 不再接受默认 profile 的远程调试；We-Read 的启动脚本固定使用 9222。
-  cfg.chromePort = cfg.chromePort ?? 9222;
   cfg.libraryPath = cfg.libraryPath || path.resolve(ROOT, '..', 'data', '数据', 'library.json');
+  if (cfg.chromeProfileDir) {
+    const configuredProfile = cfg.chromeProfileDir.replace(/^~/, os.homedir());
+    cfg.chromeProfileDir = path.isAbsolute(configuredProfile) ? configuredProfile : path.resolve(ROOT, configuredProfile);
+  }
+  cfg.autoLaunchChrome = cfg.autoLaunchChrome ?? Boolean(cfg.chromeProfileDir);
   cfg.accounts = cfg.accounts || [];
   return cfg;
 }
@@ -73,19 +99,30 @@ function accountsWithCheckpoint(accounts, libraryPath) {
   }
 }
 
+async function waitForWereadPage(session, targetId, { tries = 40, gapMs = 250 } = {}) {
+  let lastUrl = '';
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      lastUrl = JSON.parse(await evaluate(session, targetId, 'JSON.stringify(location.href)'));
+      if (lastUrl.startsWith('https://weread.qq.com/')) return targetId;
+    } catch {
+      /* 页面导航期间执行上下文会短暂消失，继续等待。 */
+    }
+    await new Promise((resolve) => setTimeout(resolve, gapMs));
+  }
+  throw new Error(`微信读书页面 10 秒内没有加载完成（当前：${lastUrl || '空白页'}）。`);
+}
+
 /** 找任意一个微信读书标签页(首页也行)。书架/订阅这类接口在首页就能调。 */
 async function getAnyWereadTab(session) {
   const tabs = await listTabs(session);
   const wr = tabs.filter((t) => t.url.includes('weread.qq.com'));
   // 已渲染好的阅读器页最好用,其次任意 weread 页
   wr.sort((a, b) => Number(b.title.includes('公众号')) - Number(a.title.includes('公众号')));
-  if (wr.length) return wr[0].targetId;
+  if (wr.length) return await waitForWereadPage(session, wr[0].targetId);
   console.error('提示:没有已打开的微信读书页面,正在打开首页。');
   const targetId = await createTab(session, 'https://weread.qq.com/');
-  // Chrome 刚创建的标签页在某些版本中会先处于 about:blank；
-  // 等待页面提交，避免在空白页执行相对路径 fetch。
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  return targetId;
+  return await waitForWereadPage(session, targetId);
 }
 
 /** 读书架:拿到已订阅公众号 + 每个号的 readerUrl(从 deepLink 推导,不用手动复制) */
@@ -101,7 +138,7 @@ async function getReaderTab(session, cfg) {
   const tabs = await listTabs(session);
   const readers = tabs.filter((t) => t.url.includes('weread.qq.com/web/mp/reader/'));
   readers.sort((a, b) => Number(b.title.includes('公众号')) - Number(a.title.includes('公众号')));
-  if (readers.length) return readers[0].targetId;
+  if (readers.length) return await waitForWereadPage(session, readers[0].targetId);
 
   // 没有现成的就自己推导一个:配置里填了就用配置的,没填就从书架里取
   let url = cfg.readerUrl && !cfg.readerUrl.includes('<') ? cfg.readerUrl : null;
@@ -111,8 +148,8 @@ async function getReaderTab(session, cfg) {
     const withUrl = shelf.find((b) => b.readerUrl);
     if (!withUrl) {
       console.error(
-        '你的微信读书书架里还没有任何公众号,所以拿不到阅读器页。\n\n' +
-          '先加一个:\n' +
+        '专用 Chrome 当前没有读到微信读书书架。首次使用时，请先在刚打开的专用 Chrome 窗口登录微信读书；登录后再点“拉取更新”。\n\n' +
+          '如果已经登录但书架确实为空，请先加一个公众号：\n' +
           '  node bin/weread.mjs --add <该公众号任意一篇文章的链接>\n' +
           '例如:\n' +
           '  node bin/weread.mjs --add https://mp.weixin.qq.com/s/xxxxxxxx\n'
@@ -188,17 +225,6 @@ function toMarkdown(sources) {
   return lines.join('\n');
 }
 
-function emitCompletion(result) {
-  // app/server.mjs 读取这条结构化结果；普通日志仍保留给命令行排障。
-  console.error(`WE_READER_RESULT:${JSON.stringify(result)}`);
-}
-
-function readArchiveSummary(stdout = '') {
-  const match = String(stdout).match(/WE_READER_ARCHIVE_SUMMARY:(\{[^\n]+\})/);
-  if (!match) return null;
-  try { return JSON.parse(match[1]); } catch { return null; }
-}
-
 async function main() {
   const cfg = loadConfig();
 
@@ -208,7 +234,7 @@ async function main() {
     return;
   }
 
-  const session = await connectChrome({ port: cfg.chromePort, profileDir: cfg.chromeProfileDir });
+  const session = await connectChrome({ port: cfg.chromePort, profileDir: cfg.chromeProfileDir, autoLaunch: cfg.autoLaunchChrome });
   try {
     // --shelf / --add 只用书架接口,在微信读书首页就能调,不需要阅读器页
     if (has('--shelf') || has('--add')) {
@@ -238,6 +264,7 @@ async function main() {
         const res = await evaluate(session, tab, buildAddToShelfJs(resolved));
         const okAdd = /"succ"\s*:\s*1/.test(res) || /"errCode"\s*:\s*0/.test(res);
         console.error(okAdd ? `已加入书架:${resolved.join('、')}` : `订阅接口返回:${res.slice(0, 200)}`);
+        if (!okAdd) process.exitCode = 1;
       }
 
       const books = await readShelf(session, tab);
@@ -328,53 +355,27 @@ async function main() {
       JSON.stringify({ fetchedAt: new Date().toISOString(), ...result }, null, 2) + '\n',
       'utf8'
     );
-    // 成功抓取后同步长期书库和本地 Markdown。任何一步失败都必须传给网页，
-    // 不能把“目录抓到了、正文没归档”误报为同步完成。
-    let completion = null;
+    // 成功抓取后同步 Second Brain 的长期书库；同步失败不影响本次抓取结果。
     const exportResult = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'export-second-brain.mjs')], {
       cwd: ROOT,
       encoding: 'utf8',
     });
     if (exportResult.status === 0) {
       console.error('Second Brain 书库已更新。');
-      const archiveResult = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'archive-second-brain.mjs')], {
-        cwd: ROOT,
-        encoding: 'utf8',
-      });
+      const archiveResult = await runArchiveWithProgress();
       if (archiveResult.status === 0) {
-        const summary = readArchiveSummary(archiveResult.stdout);
-        if (!summary) {
-          completion = { outcome: 'failed', stage: 'archive', message: '正文归档没有返回有效结果；书库未标记为同步完成。' };
-          console.error(`Second Brain Markdown 自动归档失败：${completion.message}`);
-        } else if (summary.failed > 0) {
-          completion = {
-            outcome: 'partial', stage: 'archive',
-            message: `目录已更新，但有 ${summary.failed} 篇正文未能归档。`, archive: summary,
-          };
-          console.error(`Second Brain Markdown 归档部分完成：成功 ${summary.archived}，失败 ${summary.failed}。`);
-        } else {
-          console.error(`Second Brain Markdown 归档已更新：新增 ${summary.archived}，已存在 ${summary.skipped}。`);
-        }
+        const summary = archiveResult.stdout.trim().split('\n').slice(-6).join(' ');
+        console.error(`Second Brain Markdown 归档已更新。${summary}`);
       } else {
-        completion = { outcome: 'failed', stage: 'archive', message: `正文归档失败：${archiveResult.stderr?.trim() || '未知错误'}` };
-        console.error(`Second Brain Markdown 自动归档失败：${completion.message}`);
+        const detail = archiveResult.stderr?.split(/\r?\n/).filter((line) => line && !line.startsWith('WE_READ_ARCHIVE_PROGRESS ')).slice(-3).join(' ');
+        console.error(`Second Brain Markdown 自动归档失败：${detail || '未知错误'}`);
       }
     } else {
-      completion = { outcome: 'failed', stage: 'export', message: `书库导出失败：${exportResult.stderr?.trim() || '未知错误'}` };
-      console.error(`Second Brain 自动导出失败：${completion.message}`);
+      console.error(`Second Brain 自动导出失败：${exportResult.stderr?.trim() || '未知错误'}`);
     }
     console.log(has('--format') && val('--format') === 'md' ? toMarkdown(result.sources) : JSON.stringify(result, null, 2));
     if (failed.length) {
       console.error(`\n注意:${failed.length} 个公众号抓取失败(${failed.map((f) => f.name).join('、')})`);
-      if (!completion) completion = {
-        outcome: 'partial', stage: 'directory',
-        message: `有 ${failed.length} 个公众号未能拉取，其他内容已完成同步。`,
-        failedSources: failed.map((item) => item.name),
-      };
-    }
-    if (completion) {
-      emitCompletion(completion);
-      process.exitCode = completion.outcome === 'partial' ? 4 : 1;
     }
   } finally {
     session.close();

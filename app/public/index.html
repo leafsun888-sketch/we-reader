@@ -17,6 +17,10 @@
         <div class="top-actions">
           <span id="sync-status" class="sync-status">更新状态载入中…</span>
           <span id="job-status" class="job-status">准备就绪</span>
+          <div id="job-progress" class="job-progress" role="progressbar" aria-label="同步进度" hidden>
+            <span class="job-progress-track"><i id="job-progress-fill" class="job-progress-fill"></i></span>
+            <span id="job-progress-label" class="job-progress-label">索引处理中</span>
+          </div>
           <button id="refresh-button" class="refresh-button">↻ 拉取更新</button>
           <button id="settings-button" class="icon-button" aria-label="打开设置">⚙</button>
         </div>
@@ -30,6 +34,9 @@
         <button data-tab="favorites" class="tab">收藏待读</button>
         <button data-tab="week" class="tab">最近 7 天</button>
         <button data-tab="shelf" class="tab">全部书架</button>
+        <button data-tab="twitter" class="tab">Twitter</button>
+        <button data-tab="youtube" class="tab">YouTube</button>
+        <button data-tab="dashboards" class="tab">超级大盘</button>
       </nav>
       <section id="content" class="content" aria-live="polite"></section>
     </main>
@@ -42,6 +49,44 @@
         <label>文章链接<input id="article-url" name="url" type="url" required placeholder="https://mp.weixin.qq.com/s/..." /></label>
         <button class="primary-button" type="submit">解析并订阅</button>
         <p id="subscribe-note" class="form-note"></p>
+      </form>
+    </dialog>
+    <dialog id="youtube-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="youtube-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">ADD A YOUTUBE CHANNEL</p>
+        <h2>添加 YouTube 频道</h2>
+        <p>粘贴频道主页或 /videos 链接。频道会进入 Youtube 分组；点击“同步 YouTube”后导入最新视频和可用字幕。</p>
+        <label>频道链接<input id="youtube-url" name="url" type="url" required placeholder="https://www.youtube.com/@channel" /></label>
+        <label>首次导入视频数量<input id="youtube-initial-limit" type="number" min="1" max="15" value="5" required /></label>
+        <button class="primary-button" type="submit">解析并订阅</button>
+        <p id="youtube-note" class="form-note"></p>
+      </form>
+    </dialog>
+    <dialog id="twitter-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="twitter-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">ADD A TWITTER ACCOUNT</p>
+        <h2>添加 Twitter 账号</h2>
+        <p>输入 @用户名或 x.com 用户主页。这里只订阅公开推文到本地书架，不会操作你的 Twitter 账号，也不需要登录。</p>
+        <label>账号<input id="twitter-account" name="account" type="text" required placeholder="@karpathy" /></label>
+        <label>首次导入推文数量<input id="twitter-initial-limit" type="number" min="1" max="20" value="10" required /></label>
+        <button class="primary-button" type="submit">解析并订阅</button>
+        <p id="twitter-note" class="form-note"></p>
+      </form>
+    </dialog>
+    <dialog id="dashboard-dialog" class="modal">
+      <form method="dialog" class="modal-card" id="dashboard-form">
+        <button class="modal-close" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow">FOLLOW A DASHBOARD</p>
+        <h2>关注 Dashboard</h2>
+        <p>保存一个常看的研究网页。它会作为卡片加入“超级大盘”，点击后直接在新标签页打开原网站。</p>
+        <label>名称<input id="dashboard-title" type="text" maxlength="80" required placeholder="例如：韩国散户杠杆" /></label>
+        <label>网页地址<input id="dashboard-url" type="url" required placeholder="https://example.com/" /></label>
+        <label>分类<input id="dashboard-category" type="text" maxlength="40" required value="全球市场" placeholder="例如：韩国市场" /></label>
+        <label>一句话简介<input id="dashboard-description" type="text" maxlength="240" placeholder="这个大盘主要监控什么？" /></label>
+        <button class="primary-button" type="submit">加入超级大盘</button>
+        <p id="dashboard-note" class="form-note"></p>
       </form>
     </dialog>
     <dialog id="settings-dialog" class="modal">
@@ -62,7 +107,7 @@
         <p class="eyebrow">REMOVE SUBSCRIPTION</p>
         <h2 id="remove-title">停止订阅？</h2>
         <p id="remove-note">停止后不会再拉取这个公众号。已下载的本地文章会默认保留。</p>
-        <label class="check-label"><input id="remove-archive" type="checkbox" />同时删除该公众号已下载的本地 Markdown 和图片</label>
+        <label class="check-label"><input id="remove-archive" type="checkbox" /><span id="remove-archive-label">同时删除该公众号已下载的本地 Markdown 和图片</span></label>
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="danger-button" type="submit">确认删除</button></div>
       </form>
     </dialog>
@@ -75,6 +120,7 @@
         <div class="modal-actions"><button class="secondary-button" type="button" data-close-dialog>暂不拉取</button><button class="danger-button" type="submit">仍要拉取</button></div>
       </form>
     </dialog>
+    <button id="back-to-top" class="back-to-top" type="button" aria-label="回到页面顶部" title="回到顶部" hidden><span aria-hidden="true">↑</span><strong>顶部</strong></button>
     <div id="toast" class="toast" role="status"></div>
     <script type="module" src="/app.js"></script>
   </body>

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 
 // ---------- 找到 Chrome 的调试端口 ----------
 
@@ -26,7 +27,7 @@ const DEFAULT_PROFILE_DIRS = {
 
 export function readDevToolsActivePort(profileDir) {
   const candidates = profileDir
-    ? [profileDir]
+    ? [path.resolve(profileDir)]
     : (DEFAULT_PROFILE_DIRS[process.platform] || []).map((p) => path.join(os.homedir(), p));
 
   for (const dir of candidates) {
@@ -41,6 +42,61 @@ export function readDevToolsActivePort(profileDir) {
     }
   }
   return null;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function chromeExecutable() {
+  const candidates = {
+    darwin: ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'],
+    linux: ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'],
+    win32: [
+      path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google/Chrome/Application/chrome.exe'),
+      path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
+      path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
+    ],
+  };
+  return (candidates[process.platform] || []).find((candidate) => candidate && fs.existsSync(candidate)) || null;
+}
+
+async function inspectDebugChrome(host, preferredPort, profileDir) {
+  const active = readDevToolsActivePort(profileDir);
+  const port = active?.port || preferredPort;
+  if (!port) return null;
+  if (active?.browserWsPath) return { port, browserWsPath: active.browserWsPath };
+  const response = await fetch(`http://${host}:${port}/json/version`).catch(() => null);
+  if (!response?.ok) return null;
+  const info = await response.json().catch(() => null);
+  if (!info?.webSocketDebuggerUrl) return null;
+  return { port, browserWsPath: new URL(info.webSocketDebuggerUrl).pathname };
+}
+
+async function launchManagedChrome({ host, port, profileDir }) {
+  const executable = chromeExecutable();
+  if (!executable) throw new Error('没有找到 Google Chrome，无法启动微信读书抓取窗口。');
+  const absoluteProfile = path.resolve(profileDir);
+  fs.mkdirSync(absoluteProfile, { recursive: true });
+  const child = spawn(
+    executable,
+    [
+      `--remote-debugging-address=${host}`,
+      `--remote-debugging-port=${port || 9222}`,
+      `--user-data-dir=${absoluteProfile}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--new-window',
+      'https://weread.qq.com/',
+    ],
+    { detached: true, stdio: 'ignore' }
+  );
+  child.unref();
+
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const active = await inspectDebugChrome(host, port || 9222, absoluteProfile);
+    if (active) return active;
+    await sleep(250);
+  }
+  throw new Error('已尝试启动专用 Chrome，但 10 秒内没有建立调试连接。');
 }
 
 // ---------- 极简 WebSocket 客户端 ----------
@@ -256,30 +312,26 @@ class CdpSession {
 
 /**
  * 连接到本机已在运行的 Chrome。
- * @param {{port?:number, profileDir?:string, host?:string}} opts
+ * @param {{port?:number, profileDir?:string, host?:string, autoLaunch?:boolean}} opts
  */
 export async function connectChrome(opts = {}) {
   const host = opts.host || '127.0.0.1';
-  const found = readDevToolsActivePort(opts.profileDir);
-  const port = opts.port || found?.port;
+  let found = await inspectDebugChrome(host, opts.port, opts.profileDir);
+  if (!found && opts.autoLaunch !== false && opts.profileDir) {
+    console.error('提示：Chrome 调试窗口未运行，正在启动项目专用的微信读书窗口…');
+    found = await launchManagedChrome({ host, port: opts.port || 9222, profileDir: opts.profileDir });
+  }
+  const port = found?.port || opts.port;
   if (!port) {
     throw new Error(
       '找不到 Chrome 的调试端口。请用 --remote-debugging-port=9222 启动 Chrome,\n' +
-        'Chrome 136+ 还必须使用非默认的 --user-data-dir。请运行 ./scripts/start-chrome-debug.sh，\n' +
-        '或在配置里显式写上 chromePort。详见 README「连接微信读书」一节。'
+        '或在配置里显式写上 chromePort。详见 README「启动 Chrome」一节。'
     );
   }
 
   // 优先用浏览器级 WebSocket:部分 Chrome 版本/配置下 /json 这类 HTTP 端点会返 404,
   // 但 WebSocket 一直可用。拿不到路径时再退回 HTTP 探测。
-  let browserWsPath = found?.browserWsPath;
-  if (!browserWsPath) {
-    const res = await fetch(`http://${host}:${port}/json/version`).catch(() => null);
-    if (res && res.ok) {
-      const info = await res.json();
-      browserWsPath = new URL(info.webSocketDebuggerUrl).pathname;
-    }
-  }
+  const browserWsPath = found?.browserWsPath;
   if (!browserWsPath) {
     throw new Error(
       `连上了 ${host}:${port},但拿不到浏览器 WebSocket 路径。\n` +

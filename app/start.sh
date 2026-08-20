@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/zsh
 set -euo pipefail
-PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec "$PROJECT/start.sh" "$@"
+cd "${0:A:h}"
+exec node server.mjs
