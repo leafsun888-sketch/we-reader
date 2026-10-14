@@ -33,8 +33,10 @@ VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 CHANNEL_ID = re.compile(r"^UC[A-Za-z0-9_-]{20,30}$")
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 TERRA_MODEL = "gpt-5.6-terra"
-TERRA_PROVIDER = "codex:gpt-5.6-terra:low"
-TRANSLATION_SCHEMA = Path(__file__).with_name("translation.schema.json")
+MANUSCRIPT_PROVIDER = "codex:gpt-5.6-terra:medium:lossless-v1"
+SUMMARY_PROVIDER = "codex:gpt-5.6-terra:high"
+MANUSCRIPT_SCHEMA = Path(__file__).with_name("manuscript.schema.json")
+SUMMARY_SCHEMA = Path(__file__).with_name("summary.schema.json")
 
 
 def now_iso() -> str:
@@ -290,127 +292,96 @@ def codex_environment(binary: str) -> dict[str, str]:
     return environment
 
 
-def translate_with_google(value: str) -> str:
-    translated_chunks: list[str] = []
-    for chunk in translation_chunks(value):
-        query = urllib.parse.urlencode({
-            "client": "gtx", "sl": "auto", "tl": "zh-CN", "dt": "t", "q": chunk,
-        })
-        request = urllib.request.Request(
-            f"https://translate.googleapis.com/translate_a/single?{query}",
-            headers={"User-Agent": "We-Read/1.0"},
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        translated = "".join(str(segment[0] or "") for segment in (payload[0] or []) if segment).strip()
-        if not translated:
-            raise RuntimeError("翻译服务返回空结果")
-        translated_chunks.append(translated)
-    return "\n\n".join(translated_chunks)
+def manuscript_with_terra(title: str, segments: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = [{
+        "id": segment["id"], "startSeconds": int(segment["start"]), "text": segment["text"],
+    } for segment in segments]
+    prompt = """你是长视频逐字稿编辑与翻译者。请先完整阅读所有英文字幕片段，再生成一份通顺、忠实、可连续阅读的中文逐字文稿。
 
-
-def translation_chunks(value: str, limit: int = 1200) -> list[str]:
-    chunks: list[str] = []
-    remaining = value.strip()
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        cut = max(remaining.rfind("\n", 0, limit), remaining.rfind(". ", 0, limit), remaining.rfind(" ", 0, limit))
-        cut = limit if cut < limit // 2 else cut + 1
-        chunks.append(remaining[:cut].strip())
-        remaining = remaining[cut:].strip()
-    return chunks
-
-
-def translate_with_terra(entries: list[dict[str, str]]) -> dict[str, str]:
-    if not entries:
-        return {}
-    prompt = """你是 YouTube Transcript 翻译器。把输入 JSON 中每条 text 忠实翻译为自然、清晰的简体中文。
-这些片段按视频字幕顺序排列，可能跨句；请结合相邻片段理解，但每个 id 只能返回对应片段的译文。
-完整保留数字、人名、公司、股票代码、产品名和技术名词，不添加原文没有的信息，不做摘要。
-输出必须符合给定 JSON Schema，id 原样返回。
+这不是摘要。规则：
+1. 不遗漏任何有意义的信息，包括事实、数字、例子、问题、回答、限定条件、转折、论证顺序和结论；
+2. 利用全文上下文修复字幕的错误断句、重复碎片、口误式重复和明显 ASR 识别错误，但不得添加原文没有的信息；
+3. 删除纯粹无语义的 um/uh、机械重复和 [music] 等噪声；有表达意义的语气、犹豫与强调必须保留；
+4. 逐句忠实翻译成自然中文，保留人名、公司、产品、股票代码、技术词和数字；不要概括或压缩；
+5. 按主题、说话人转换和自然语义合理分段，每段通常 3-7 句；
+6. 每个输入 id 必须且只能出现在某一个 paragraph.sourceIds 中，sourceIds 必须保持输入顺序。这样可以审计是否遗漏。
+7. titleZh 是忠实自然的中文标题。
 
 输入：
-""" + json.dumps(entries, ensure_ascii=False)
+""" + json.dumps({"title": title, "segments": payload}, ensure_ascii=False)
     output_path = ""
     try:
-        with tempfile.NamedTemporaryFile(prefix="we-read-youtube-translation-", suffix=".json", delete=False) as output:
+        with tempfile.NamedTemporaryFile(prefix="we-read-youtube-manuscript-", suffix=".json", delete=False) as output:
             output_path = output.name
         command = [
             codex_binary(), "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
             "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(PROJECT),
-            "-m", TERRA_MODEL, "-c", 'model_reasoning_effort="low"', "--color", "never",
-            "--output-schema", str(TRANSLATION_SCHEMA), "-o", output_path, "-",
+            "-m", TERRA_MODEL, "-c", 'model_reasoning_effort="medium"', "--color", "never",
+            "--output-schema", str(MANUSCRIPT_SCHEMA), "-o", output_path, "-",
         ]
         result = subprocess.run(
-            command, input=prompt, text=True, capture_output=True, timeout=300, check=False,
+            command, input=prompt, text=True, capture_output=True, timeout=600, check=False,
             env=codex_environment(command[0]),
         )
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "Terra 翻译失败")[-1200:])
+            raise RuntimeError((result.stderr or result.stdout or "Terra Medium 中文文稿生成失败")[-1200:])
         parsed = json.loads(Path(output_path).read_text(encoding="utf-8"))
-        translations = {
-            str(item.get("id")): str(item.get("translation") or "").strip()
-            for item in parsed.get("translations", []) if item.get("id") and item.get("translation")
-        }
-        return translations
+        paragraphs = parsed.get("paragraphs") or []
+        expected = [segment["id"] for segment in segments]
+        returned = [source_id for paragraph in paragraphs for source_id in paragraph.get("sourceIds", [])]
+        if returned != expected:
+            raise RuntimeError(f"中文文稿覆盖不完整：期望 {len(expected)} 个片段，返回 {len(returned)} 个")
+        starts = {segment["id"]: int(segment["start"]) for segment in segments}
+        normalized = []
+        for paragraph in paragraphs:
+            text = re.sub(r"\s+", " ", str(paragraph.get("text") or "")).strip()
+            source_ids = paragraph.get("sourceIds") or []
+            if not text or not source_ids:
+                raise RuntimeError("Terra Medium 返回空段落")
+            normalized.append({"start": starts[source_ids[0]], "sourceIds": source_ids, "text": text})
+        title_zh = re.sub(r"\s+", " ", str(parsed.get("titleZh") or "")).strip()
+        if not title_zh or not normalized:
+            raise RuntimeError("Terra Medium 未返回完整中文文稿")
+        return {"title": title_zh, "paragraphs": normalized}
     finally:
         if output_path:
             Path(output_path).unlink(missing_ok=True)
 
 
-def translate_entries(entries: list[dict[str, str]]) -> tuple[dict[str, str], dict[str, str]]:
-    translations: dict[str, str] = {}
-    providers: dict[str, str] = {}
-    batches: list[list[dict[str, str]]] = []
-    batch: list[dict[str, str]] = []
-    batch_chars = 0
-    for entry in entries:
-        length = len(entry.get("text", ""))
-        if batch and (len(batch) >= 8 or batch_chars + length > 40000):
-            batches.append(batch)
-            batch, batch_chars = [], 0
-        batch.append(entry)
-        batch_chars += length
-    if batch:
-        batches.append(batch)
-    def translate_batch(current: list[dict[str, str]]) -> None:
-        if not current:
-            return
-        try:
-            result = translate_with_terra(current)
-            for entry in current:
-                if not result.get(entry["id"]):
-                    continue
-                translations[entry["id"]] = result[entry["id"]]
-                providers[entry["id"]] = TERRA_PROVIDER
-            missing = [entry for entry in current if not result.get(entry["id"])]
-            if missing:
-                print(f"YouTube Terra 缺少 {len(missing)} 个片段，拆小重试", file=sys.stderr)
-                if len(current) == 1:
-                    entry = current[0]
-                    translations[entry["id"]] = translate_with_google(entry["text"])
-                    providers[entry["id"]] = "google-fallback"
-                    return
-                midpoint = max(1, len(missing) // 2)
-                translate_batch(missing[:midpoint])
-                translate_batch(missing[midpoint:])
-        except Exception as error:
-            if len(current) > 1:
-                print(f"YouTube Terra 批量翻译失败，拆小重试：{error}", file=sys.stderr)
-                midpoint = max(1, len(current) // 2)
-                translate_batch(current[:midpoint])
-                translate_batch(current[midpoint:])
-                return
-            entry = current[0]
-            print(f"YouTube Terra 单段翻译失败，改用 Google 回退：{error}", file=sys.stderr)
-            translations[entry["id"]] = translate_with_google(entry["text"])
-            providers[entry["id"]] = "google-fallback"
+def summarize_with_terra(title: str, transcript: str) -> str:
+    prompt = """你是长视频内容编辑。请完整理解下面的 YouTube Transcript，并输出一段简体中文梗概。
+要求：
+1. 只写一个自然段，约 180-300 个汉字；
+2. 说明这期内容主要讨论什么、核心观点或框架、使用了哪些关键事实/案例，以及最后得出什么结论；
+3. 保留重要人名、公司、产品、技术词和数字；
+4. 不使用项目符号，不写“本视频/本期节目将会”，不评价质量，不添加原文没有的信息。
 
-    for current in batches:
-        translate_batch(current)
-    return translations, providers
+标题：
+""" + title + "\n\nTranscript:\n" + transcript
+    output_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="we-read-youtube-summary-", suffix=".json", delete=False) as output:
+            output_path = output.name
+        command = [
+            codex_binary(), "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
+            "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(PROJECT),
+            "-m", TERRA_MODEL, "-c", 'model_reasoning_effort="high"', "--color", "never",
+            "--output-schema", str(SUMMARY_SCHEMA), "-o", output_path, "-",
+        ]
+        result = subprocess.run(
+            command, input=prompt, text=True, capture_output=True, timeout=420, check=False,
+            env=codex_environment(command[0]),
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "Terra High 梗概生成失败")[-1200:])
+        parsed = json.loads(Path(output_path).read_text(encoding="utf-8"))
+        summary = re.sub(r"\s+", " ", str(parsed.get("summary") or "")).strip()
+        if not summary:
+            raise RuntimeError("Terra High 未返回梗概")
+        return summary
+    finally:
+        if output_path:
+            Path(output_path).unlink(missing_ok=True)
 
 
 def coalesce_transcript_snippets(fetched: Any, target_chars: int = 5000) -> list[dict[str, Any]]:
@@ -437,9 +408,10 @@ def coalesce_transcript_snippets(fetched: Any, target_chars: int = 5000) -> list
 
 def transcript_markdown(
     channel: dict[str, str], video: dict[str, Any], segments: list[dict[str, Any]],
-    translations: dict[str, str], language: str, is_generated: bool, provider: str,
+    manuscript: dict[str, Any], language: str, is_generated: bool, provider: str,
+    summary: str, summary_provider: str,
 ) -> str:
-    translated_title = translations.get("title") or video["title"]
+    translated_title = manuscript.get("title") or video["title"]
     lines = [
         "---",
         f"title: {yaml_string(translated_title)}",
@@ -452,8 +424,10 @@ def transcript_markdown(
         f"published_at: {yaml_string(video.get('publishedAt', ''))}",
         f"language: {yaml_string(language)}",
         f"is_generated: {str(bool(is_generated)).lower()}",
-        f"translation_provider: {yaml_string(provider)}",
-        'transcript_format: "readable-v3"',
+        f"manuscript_provider: {yaml_string(provider)}",
+        f"summary: {yaml_string(summary)}",
+        f"summary_provider: {yaml_string(summary_provider)}",
+        'transcript_format: "contextual-v1"',
         f"captured_at: {yaml_string(now_iso())}",
         "---",
         "",
@@ -463,13 +437,16 @@ def transcript_markdown(
         "",
         f"> 频道：[{channel['name']}]({channel['url']}) · [观看视频]({video['url']})",
         "",
-        "## 中文译文",
+        "## 内容梗概",
+        "",
+        summary,
+        "",
+        "## 中文逐字文稿",
         "",
     ]
-    for segment in segments:
-        segment_id = segment["id"]
-        second = max(0, int(segment["start"]))
-        append_readable_segment(lines, video["url"], second, translations[segment_id], 220)
+    for paragraph in manuscript.get("paragraphs", []):
+        second = max(0, int(paragraph["start"]))
+        lines.extend([f"[{time_label(second)}]({video['url']}&t={second}s) {paragraph['text']}", ""])
     lines.extend(["## English Transcript", ""])
     for segment in segments:
         second = max(0, int(segment["start"]))
@@ -514,24 +491,23 @@ def archive_transcript(data_root: Path, channel: dict[str, str], video: dict[str
         hydrate_video_metadata(video)
     transcript = select_transcript(YouTubeTranscriptApi(), video["videoId"])
     fetched = transcript.fetch()
-    segments = coalesce_transcript_snippets(fetched)
+    segments = coalesce_transcript_snippets(fetched, target_chars=700)
     if not segments:
         raise RuntimeError("字幕内容为空")
-    entries = [{"id": "title", "text": video["title"]}] + [
-        {"id": segment["id"], "text": segment["text"]} for segment in segments
-    ]
-    translations, providers = translate_entries(entries)
-    provider = TERRA_PROVIDER if set(providers.values()) == {TERRA_PROVIDER} else "terra-with-google-fallback"
-    translated_title = translations.get("title") or video["title"]
+    original_transcript = "\n\n".join(segment["text"] for segment in segments)
+    manuscript = manuscript_with_terra(video["title"], segments)
+    translated_title = manuscript["title"]
+    summary = summarize_with_terra(video["title"], original_transcript)
     published_day = (video.get("publishedAt") or "")[:10] or dt.date.today().isoformat()
     folder = f"{published_day} {safe_name(video['title'])}"
     target_dir = data_root / "文章" / "YouTube" / safe_name(channel["name"]) / folder
     markdown = target_dir / f"{folder}.md"
     target_dir.mkdir(parents=True, exist_ok=True)
     markdown.write_text(transcript_markdown(
-        channel, video, segments, translations,
+        channel, video, segments, manuscript,
         str(getattr(transcript, "language_code", "")),
-        bool(getattr(transcript, "is_generated", False)), provider,
+        bool(getattr(transcript, "is_generated", False)), MANUSCRIPT_PROVIDER,
+        summary, SUMMARY_PROVIDER,
     ), encoding="utf-8")
     return {
         "sourceId": channel["sourceId"],
@@ -542,7 +518,9 @@ def archive_transcript(data_root: Path, channel: dict[str, str], video: dict[str
         "markdown": str(markdown.relative_to(data_root)),
         "language": getattr(transcript, "language_code", ""),
         "isGenerated": bool(getattr(transcript, "is_generated", False)),
-        "translationProvider": provider,
+        "manuscriptProvider": MANUSCRIPT_PROVIDER,
+        "summary": summary,
+        "summaryProvider": SUMMARY_PROVIDER,
         "archivedAt": now_iso(),
     }
 
@@ -606,7 +584,9 @@ def update_library_item(library: dict[str, Any], source_id: str, video: dict[str
     item.update({
         "originalTitle": archived.get("originalTitle") or video["title"],
         "title": archived.get("title") or video["title"],
-        "translationProvider": archived.get("translationProvider"),
+        "manuscriptProvider": archived.get("manuscriptProvider"),
+        "summary": archived.get("summary") or item.get("summary") or "",
+        "summaryProvider": archived.get("summaryProvider") or item.get("summaryProvider") or "",
         "t": int(video.get("t") or item.get("t") or 0),
         "publishedAt": video.get("publishedAt") or item.get("publishedAt") or "",
     })
@@ -712,6 +692,146 @@ def reflow_archives(data_root: Path, rid: str | None = None) -> dict[str, int]:
     status["updatedAt"] = now_iso()
     write_json(files["status"], status)
     return {"scanned": scanned, "updated": updated, "missing": missing}
+
+
+def backfill_summaries(data_root: Path, limit: int = 0) -> dict[str, int]:
+    files = paths(data_root)
+    library = read_json(files["library"], {"updatedAt": None, "sources": []})
+    status = read_json(files["status"], {"archived": {}, "failures": {}})
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for source in library.get("sources", []):
+        if source.get("platform") != "youtube":
+            continue
+        for item in source.get("items", []):
+            archived = status.get("archived", {}).get(item.get("rid"), {})
+            if not item.get("summary") and archived.get("markdown"):
+                candidates.append((item, archived))
+    candidates.sort(key=lambda pair: int(pair[0].get("t") or 0), reverse=True)
+    if limit > 0:
+        candidates = candidates[:limit]
+    generated = failed = 0
+    for item, archived in candidates:
+        try:
+            markdown = data_root / str(archived["markdown"])
+            raw = markdown.read_text(encoding="utf-8")
+            transcript = raw.split("## English Transcript", 1)[-1]
+            transcript = re.sub(r"\[[^\]]+\]\([^)]+\)\s*", "", transcript)
+            transcript = re.sub(r"\s+", " ", transcript).strip()
+            if not transcript:
+                raise RuntimeError("本地英文 Transcript 为空")
+            summary = summarize_with_terra(
+                str(item.get("originalTitle") or item.get("title") or ""),
+                transcript,
+            )
+            item["summary"] = summary
+            item["summaryProvider"] = SUMMARY_PROVIDER
+            archived["summary"] = summary
+            archived["summaryProvider"] = SUMMARY_PROVIDER
+            if not re.search(r"(?m)^summary:\s*", raw):
+                raw = re.sub(
+                    r"(?m)^(translation_provider:\s*.*)$",
+                    rf"\1\nsummary: {yaml_string(summary)}\nsummary_provider: {yaml_string(SUMMARY_PROVIDER)}",
+                    raw, count=1,
+                )
+            if "## 内容梗概" not in raw:
+                raw = raw.replace("## 中文译文", f"## 内容梗概\n\n{summary}\n\n## 中文译文", 1)
+            markdown.write_text(raw, encoding="utf-8")
+            library["updatedAt"] = now_iso()
+            status["updatedAt"] = now_iso()
+            write_json(files["library"], library)
+            write_json(files["status"], status)
+            generated += 1
+        except Exception as error:
+            print(f"YouTube 梗概回填失败 {item.get('rid')}: {error}", file=sys.stderr)
+            failed += 1
+    return {"eligible": len(candidates), "generated": generated, "failed": failed}
+
+
+def english_segments_from_markdown(raw: str) -> list[dict[str, Any]]:
+    if "## English Transcript" not in raw:
+        return []
+    body = raw.split("## English Transcript", 1)[1]
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", body) if block.strip()]
+    timestamp = re.compile(r"^\[[^\]]+\]\([^)]*[?&]t=(\d+)s\)\s*(.*)$", re.S)
+    coarse: list[dict[str, Any]] = []
+    current_start = 0
+    for block in blocks:
+        match = timestamp.match(block)
+        if match:
+            text = re.sub(r"\s+", " ", match.group(2)).strip()
+            if text:
+                current_start = int(match.group(1))
+                coarse.append({"start": current_start, "text": text})
+        elif coarse and not block.startswith("## "):
+            coarse.append({"start": current_start, "text": re.sub(r"\s+", " ", block).strip()})
+    segments: list[dict[str, Any]] = []
+    for item in coarse:
+        for paragraph in readable_paragraphs(item["text"], 700):
+            segments.append({"id": f"segment-{len(segments)}", "start": item["start"], "text": paragraph})
+    return segments
+
+
+def manuscript_markdown(paragraphs: list[dict[str, Any]], video_url: str) -> str:
+    lines = ["## 中文逐字文稿", ""]
+    for paragraph in paragraphs:
+        second = max(0, int(paragraph["start"]))
+        lines.extend([f"[{time_label(second)}]({video_url}&t={second}s) {paragraph['text']}", ""])
+    return "\n".join(lines).rstrip()
+
+
+def backfill_manuscripts(data_root: Path, limit: int = 0) -> dict[str, int]:
+    files = paths(data_root)
+    library = read_json(files["library"], {"updatedAt": None, "sources": []})
+    status = read_json(files["status"], {"archived": {}, "failures": {}})
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for source in library.get("sources", []):
+        if source.get("platform") != "youtube":
+            continue
+        for item in source.get("items", []):
+            archived = status.get("archived", {}).get(item.get("rid"), {})
+            if archived.get("markdown") and item.get("manuscriptProvider") != MANUSCRIPT_PROVIDER:
+                candidates.append((item, archived))
+    candidates.sort(key=lambda pair: int(pair[0].get("t") or 0), reverse=True)
+    if limit > 0:
+        candidates = candidates[:limit]
+    generated = failed = 0
+    for item, archived in candidates:
+        try:
+            markdown = data_root / str(archived["markdown"])
+            raw = markdown.read_text(encoding="utf-8")
+            segments = english_segments_from_markdown(raw)
+            if not segments:
+                raise RuntimeError("本地英文 Transcript 为空")
+            manuscript = manuscript_with_terra(str(item.get("originalTitle") or item.get("title") or ""), segments)
+            raw = re.sub(r"(?m)^title:\s*.*$", f"title: {yaml_string(manuscript['title'])}", raw, count=1)
+            if re.search(r"(?m)^translation_provider:\s*", raw):
+                raw = re.sub(r"(?m)^translation_provider:\s*.*$", f"manuscript_provider: {yaml_string(MANUSCRIPT_PROVIDER)}", raw, count=1)
+            elif re.search(r"(?m)^manuscript_provider:\s*", raw):
+                raw = re.sub(r"(?m)^manuscript_provider:\s*.*$", f"manuscript_provider: {yaml_string(MANUSCRIPT_PROVIDER)}", raw, count=1)
+            else:
+                raw = re.sub(r"(?m)^(is_generated:\s*.*)$", rf"\1\nmanuscript_provider: {yaml_string(MANUSCRIPT_PROVIDER)}", raw, count=1)
+            raw = re.sub(r"(?m)^transcript_format:\s*.*$", 'transcript_format: "contextual-v1"', raw, count=1)
+            replacement = manuscript_markdown(manuscript["paragraphs"], str(item.get("url") or archived.get("url") or ""))
+            raw, replaced = re.subn(
+                r"## (?:中文译文|中文逐字文稿)\s*\n[\s\S]*?(?=\n## English Transcript)",
+                replacement + "\n", raw, count=1,
+            )
+            if replaced != 1:
+                raise RuntimeError("找不到旧中文译文章节")
+            markdown.write_text(raw, encoding="utf-8")
+            item["title"] = manuscript["title"]
+            item["manuscriptProvider"] = MANUSCRIPT_PROVIDER
+            archived["title"] = manuscript["title"]
+            archived["manuscriptProvider"] = MANUSCRIPT_PROVIDER
+            archived.pop("translationProvider", None)
+            library["updatedAt"] = status["updatedAt"] = now_iso()
+            write_json(files["library"], library)
+            write_json(files["status"], status)
+            generated += 1
+        except Exception as error:
+            print(f"YouTube 中文文稿回填失败 {item.get('rid')}: {error}", file=sys.stderr)
+            failed += 1
+    return {"eligible": len(candidates), "generated": generated, "failed": failed}
 
 
 def emit_progress(completed: int, total: int, archived: int, failed: int) -> None:
@@ -852,6 +972,10 @@ def build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--delay", type=float, default=1)
     reflow = commands.add_parser("reflow-archives")
     reflow.add_argument("--rid")
+    summaries = commands.add_parser("backfill-summaries")
+    summaries.add_argument("--limit", type=int, default=0)
+    manuscripts = commands.add_parser("backfill-manuscripts")
+    manuscripts.add_argument("--limit", type=int, default=0)
     return parser
 
 
@@ -869,6 +993,10 @@ def main() -> None:
         )
     elif args.command == "reflow-archives":
         result = reflow_archives(data_root, args.rid)
+    elif args.command == "backfill-summaries":
+        result = backfill_summaries(data_root, max(0, args.limit))
+    elif args.command == "backfill-manuscripts":
+        result = backfill_manuscripts(data_root, max(0, args.limit))
     else:
         result = backfill_metadata(data_root, max(0, args.delay))
     print(json.dumps(result, ensure_ascii=False, indent=2))

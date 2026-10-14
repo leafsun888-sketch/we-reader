@@ -8,10 +8,11 @@ import { latestArchiveProgress } from './lib/progress.mjs';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT = path.resolve(ROOT, '..');
 const PUBLIC = path.join(ROOT, 'public');
-const DATA = path.join(PROJECT, 'data');
+const DATA = path.resolve(process.env.WE_READ_DATA_DIR || path.join(PROJECT, 'data'));
 const FETCHER = path.join(PROJECT, 'fetcher');
 const YOUTUBE = path.join(PROJECT, 'youtube');
 const TWITTER = path.join(PROJECT, 'twitter');
+const PODCAST = path.join(PROJECT, 'podcast');
 const LIBRARY = path.join(DATA, '数据', 'library.json');
 const FAVORITES = path.join(DATA, '数据', 'favorites.json');
 const ANNOTATIONS = path.join(DATA, '数据', 'annotations.json');
@@ -27,6 +28,10 @@ const TWITTER_COOKIES = path.join(DATA, '数据', 'twitter-cookies.json');
 const DASHBOARDS = path.join(DATA, '数据', 'dashboards.json');
 const TWITTER_PYTHON = path.join(TWITTER, '.venv', 'bin', 'python');
 const TWITTER_SYNC = path.join(TWITTER, 'sync.py');
+const PODCAST_SUBSCRIPTIONS = path.join(DATA, '数据', 'podcast-subscriptions.json');
+const PODCAST_STATUS = path.join(DATA, '数据', 'podcast-status.json');
+const PODCAST_PYTHON = process.env.WE_READ_PYTHON || path.join(PODCAST, '.venv', 'bin', 'python');
+const PODCAST_SYNC = path.join(PODCAST, 'sync.py');
 const CONFIG = path.join(FETCHER, 'config.json');
 const QUOTA = path.join(FETCHER, 'data', 'quota.json');
 const LATEST = path.join(FETCHER, 'data', 'latest.json');
@@ -37,7 +42,8 @@ const FIXED_SOURCE_GROUPS = Object.freeze([
   { id: DEFAULT_SOURCE_GROUP_ID, name: '价值', order: 1 },
   { id: 'group_growth', name: '成长', order: 2 },
   { id: 'group_youtube', name: 'Youtube', order: 3 },
-  { id: 'group_twitter', name: 'Twitter', order: 4 },
+  { id: 'group_podcast', name: '小宇宙', order: 4 },
+  { id: 'group_twitter', name: 'Twitter', order: 5 },
 ]);
 const port = Number(process.env.PORT || 8041);
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
@@ -58,6 +64,7 @@ const DEFAULT_DASHBOARDS = Object.freeze({
 let job = { status: 'idle', kind: null, phase: null, message: '准备就绪', startedAt: null, finishedAt: null, output: '' };
 let groupWriteQueue = Promise.resolve();
 let dashboardWriteQueue = Promise.resolve();
+let favoriteWriteQueue = Promise.resolve();
 let twitterScheduleTimer = null;
 let twitterNextScheduledAt = null;
 
@@ -78,6 +85,19 @@ const writeJson = async (file, value) => {
   } finally {
     await fs.rm(temp, { force: true }).catch(() => {});
   }
+};
+const validFavoriteId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 600;
+const queueFavoriteWrite = (mutate) => {
+  const operation = favoriteWriteQueue.then(async () => {
+    const current = await readJson(FAVORITES, { ids: [] });
+    const ids = new Set(Array.isArray(current.ids) ? current.ids.filter(validFavoriteId) : []);
+    mutate(ids);
+    const next = { ids: [...ids], updatedAt: new Date().toISOString() };
+    await writeJson(FAVORITES, next);
+    return next;
+  });
+  favoriteWriteQueue = operation.catch(() => {});
+  return operation;
 };
 const dashboardUrl = (value) => {
   const raw = String(value || '').trim().replace(/[。；;，,]+$/, '');
@@ -148,10 +168,11 @@ const mutateGroups = (mutator) => {
   return operation;
 };
 const ensureFixedSourceGroups = async () => {
-  const [config, youtubeConfig, twitterConfig, stored] = await Promise.all([
+  const [config, youtubeConfig, twitterConfig, podcastConfig, stored] = await Promise.all([
     readJson(CONFIG, { accounts: [] }),
     readJson(YOUTUBE_SUBSCRIPTIONS, { channels: [] }),
     readJson(TWITTER_SUBSCRIPTIONS, { accounts: [] }),
+    readJson(PODCAST_SUBSCRIPTIONS, { podcasts: [] }),
     readJson(SOURCE_GROUPS, { groups: [], assignments: {} }),
   ]);
   const current = normalizedGroups(stored);
@@ -163,6 +184,9 @@ const ensureFixedSourceGroups = async () => {
   }
   for (const account of twitterConfig.accounts || []) {
     if (typeof account.sourceId === 'string' && !current.assignments[account.sourceId]) current.assignments[account.sourceId] = 'group_twitter';
+  }
+  for (const podcast of podcastConfig.podcasts || []) {
+    if (typeof podcast.sourceId === 'string' && (!current.assignments[podcast.sourceId] || current.assignments[podcast.sourceId] === 'group_youtube')) current.assignments[podcast.sourceId] = 'group_podcast';
   }
   const persisted = { groups: current.groups, assignments: current.assignments, updatedAt: stored.updatedAt || null };
   const needsWrite = JSON.stringify(stored.groups || []) !== JSON.stringify(persisted.groups)
@@ -189,9 +213,10 @@ const localDay = () => {
   return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}`;
 };
 const archiveFor = async (articleId) => {
-  const statusFile = articleId.startsWith('YT_VIDEO_') ? YOUTUBE_STATUS : articleId.startsWith('TW_TWEET_') ? TWITTER_STATUS : ARCHIVE_STATUS;
+  const statusFile = articleId.startsWith('YT_VIDEO_') ? YOUTUBE_STATUS : articleId.startsWith('XYZ_EPISODE_') ? PODCAST_STATUS : articleId.startsWith('TW_TWEET_') ? TWITTER_STATUS : ARCHIVE_STATUS;
   const status = await readJson(statusFile, { archived: {} });
-  return { status, entry: status.archived?.[articleId] || null };
+  const entry = status.archived?.[articleId];
+  return { status, entry: entry?.incomplete ? null : (entry || null) };
 };
 const archiveMarkdownPath = (entry) => {
   if (!entry?.markdown) return null;
@@ -202,6 +227,7 @@ const archiveMarkdownPath = (entry) => {
 
 function runFetcher(kind, args) {
   if (job.status === 'running') throw new Error('已有任务正在执行，请等待完成');
+  const archivingOnly = args.includes('--archive-only');
   job = { status: 'running', kind, phase: kind === 'refresh' ? 'fetching' : 'subscribing', message: kind === 'refresh' ? '正在连接微信读书并拉取文章索引…' : '正在解析文章链接并加入书架…', startedAt: new Date().toISOString(), finishedAt: null, output: '', progress: kind === 'refresh' ? { stage: 'indexing', completed: 0, total: null, archived: 0, failed: 0 } : null };
   const child = spawn(process.execPath, [path.join(FETCHER, 'bin', 'weread.mjs'), ...args], { cwd: FETCHER, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
@@ -225,7 +251,11 @@ function runFetcher(kind, args) {
         ...job,
         status: code === 0 ? 'success' : 'failed',
         phase: code === 0 ? 'complete' : 'failed',
-        message: code === 0 ? (kind === 'refresh' ? '同步完成，书库已更新。' : '公众号已加入书架。') : '任务未完成，请查看提示。',
+        message: code === 0 ? (kind === 'refresh'
+          ? (job.progress?.failed > 0
+            ? `本地归档完成：${job.progress.archived} 篇成功，${job.progress.failed} 篇待重试。`
+            : (archivingOnly ? '本地正文与图片归档完成。' : '同步完成，书库已更新。'))
+          : kind === 'wechat_url_repair' ? '微信原文链接修复完成。' : '公众号已加入书架。') : '任务未完成，请查看提示。',
         finishedAt: new Date().toISOString(),
         output,
         progress: code === 0 && kind === 'refresh' ? { ...(job.progress || {}), stage: 'complete' } : job.progress,
@@ -279,6 +309,55 @@ function runYoutube(kind, args) {
         status: code === 0 ? 'success' : 'failed',
         phase: code === 0 ? 'complete' : 'failed',
         message: code === 0 ? (refreshing ? 'YouTube 同步完成。' : 'YouTube 频道已加入。') : 'YouTube 任务未完成。',
+        finishedAt: new Date().toISOString(), output,
+        progress: code === 0 && refreshing ? { ...(job.progress || {}), stage: 'complete' } : job.progress,
+      };
+      resolve({ code, output, stdout, stderr });
+    });
+  });
+}
+
+const latestPodcastProgress = (output) => {
+  const lines = String(output || '').split(/\r?\n/).reverse();
+  for (const line of lines) {
+    if (!line.startsWith('WE_READ_PODCAST_PROGRESS ')) continue;
+    try { return { stage: 'archiving', ...JSON.parse(line.slice('WE_READ_PODCAST_PROGRESS '.length)) }; }
+    catch { return null; }
+  }
+  return null;
+};
+
+function runPodcast(kind, args) {
+  if (job.status === 'running') throw new Error('已有任务正在执行，请等待完成');
+  const refreshing = kind === 'podcast_refresh';
+  job = {
+    status: 'running', kind, phase: refreshing ? 'discovering' : 'subscribing',
+    message: refreshing ? '正在检查小宇宙节目更新…' : '正在解析小宇宙节目…',
+    startedAt: new Date().toISOString(), finishedAt: null, output: '',
+    progress: refreshing ? { stage: 'indexing', completed: 0, total: null, archived: 0, failed: 0 } : null,
+  };
+  const child = spawn(PODCAST_PYTHON, [PODCAST_SYNC, ...args], { cwd: PODCAST, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '', output = '';
+  const append = (chunk, target) => {
+    const text = chunk.toString();
+    if (target === 'stdout') stdout += text; else stderr += text;
+    output = (output + text).slice(-16000);
+    job.output = output;
+    const progress = latestPodcastProgress(output);
+    if (progress) {
+      job.phase = 'archiving';
+      job.message = '小宇宙单集已进入书库，正在本机转录并生成梗概…';
+      job.progress = progress;
+    }
+  };
+  child.stdout.on('data', (chunk) => append(chunk, 'stdout'));
+  child.stderr.on('data', (chunk) => append(chunk, 'stderr'));
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (code) => {
+      job = {
+        ...job, status: code === 0 ? 'success' : 'failed', phase: code === 0 ? 'complete' : 'failed',
+        message: code === 0 ? (refreshing ? '小宇宙同步完成。' : '小宇宙节目已加入。') : '小宇宙任务未完成。',
         finishedAt: new Date().toISOString(), output,
         progress: code === 0 && refreshing ? { ...(job.progress || {}), stage: 'complete' } : job.progress,
       };
@@ -376,10 +455,11 @@ function scheduleTwitterRefresh() {
 }
 
 async function management() {
-  const [config, youtubeConfig, twitterConfig, library, quota, latest, groupSettings, twitterAuthenticated] = await Promise.all([
+  const [config, youtubeConfig, twitterConfig, podcastConfig, library, quota, latest, groupSettings, twitterAuthenticated] = await Promise.all([
     readJson(CONFIG, { accounts: [] }),
     readJson(YOUTUBE_SUBSCRIPTIONS, { channels: [] }),
     readJson(TWITTER_SUBSCRIPTIONS, { accounts: [] }),
+    readJson(PODCAST_SUBSCRIPTIONS, { podcasts: [] }),
     readJson(LIBRARY, { sources: [] }),
     readJson(QUOTA, {}),
     readJson(LATEST, {}),
@@ -398,11 +478,15 @@ async function management() {
     name: account.name, bookId: account.sourceId, platform: 'twitter', userId: account.userId, screenName: account.screenName, url: account.url, initialTweetLimit: account.initialTweetLimit || 10,
     mutedInFeed: account.mutedInFeed === true, feedTag: ['高频', '低频'].includes(account.feedTag) ? account.feedTag : '低频',
   }));
+  const podcastAccounts = (podcastConfig.podcasts || []).filter((podcast) => podcast.enabled !== false).map((podcast) => ({
+    name: podcast.name, bookId: podcast.sourceId, platform: 'podcast', podcastId: podcast.podcastId,
+    url: podcast.url, initialEpisodeLimit: podcast.initialEpisodeLimit || 3,
+  }));
   return {
     appVersion: APP_VERSION,
-    accounts: [...wechatAccounts, ...youtubeAccounts, ...twitterAccounts].map((account) => {
+    accounts: [...wechatAccounts, ...youtubeAccounts, ...podcastAccounts, ...twitterAccounts].map((account) => {
       const source = sourceById.get(account.bookId);
-      const defaultGroup = account.platform === 'youtube' ? 'group_youtube' : account.platform === 'twitter' ? 'group_twitter' : DEFAULT_SOURCE_GROUP_ID;
+      const defaultGroup = account.platform === 'youtube' ? 'group_youtube' : account.platform === 'podcast' ? 'group_podcast' : account.platform === 'twitter' ? 'group_twitter' : DEFAULT_SOURCE_GROUP_ID;
       return { ...account, platform: account.platform || source?.platform || 'wechat', groupId: sourceGroups.assignments[account.bookId] || defaultGroup, articleCount: source?.items?.length || 0, latestAt: source?.items?.[0]?.t || null };
     }),
     groups: sourceGroups.groups,
@@ -417,6 +501,7 @@ async function management() {
       maxRunsPerDay,
       remainingRuns: Math.max(0, maxRunsPerDay - runsToday),
       youtubeLastSuccessAt: (youtubeConfig.channels || []).map((channel) => channel.lastSyncedAt).filter(Boolean).sort().at(-1) || null,
+      podcastLastSuccessAt: (podcastConfig.podcasts || []).map((podcast) => podcast.lastSyncedAt).filter(Boolean).sort().at(-1) || null,
       twitterLastSuccessAt: (twitterConfig.accounts || []).map((account) => account.lastSyncedAt).filter(Boolean).sort().at(-1) || null,
       twitterNextScheduledAt,
       twitterScheduleLocalTimes: ['12:00', '20:00'],
@@ -513,7 +598,7 @@ const server = http.createServer(async (req, res) => {
     const articleRequest = url.pathname.match(/^\/api\/articles\/([^/]+)$/);
     if (articleRequest && req.method === 'GET') {
       const articleId = decodeURIComponent(articleRequest[1]);
-      if (!articleId.startsWith('MP_WXS_') && !articleId.startsWith('YT_VIDEO_') && !articleId.startsWith('TW_TWEET_')) return sendJson(res, 400, { error: '内容标识无效' });
+      if (!articleId.startsWith('MP_WXS_') && !articleId.startsWith('YT_VIDEO_') && !articleId.startsWith('XYZ_EPISODE_') && !articleId.startsWith('TW_TWEET_')) return sendJson(res, 400, { error: '内容标识无效' });
       const { entry } = await archiveFor(articleId);
       const markdown = archiveMarkdownPath(entry);
       if (!markdown) return sendJson(res, 404, { error: '这篇文章尚未完成本地归档' });
@@ -532,11 +617,26 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') return sendJson(res, 200, await readJson(FAVORITES, { ids: [] }));
       if (req.method === 'POST') {
         const payload = await readJsonBody(req);
-        if (!Array.isArray(payload.ids) || payload.ids.length > 5000 || payload.ids.some((id) => typeof id !== 'string' || id.length > 600)) throw new Error('收藏数据格式无效');
-        await writeJson(FAVORITES, { ids: [...new Set(payload.ids)], updatedAt: new Date().toISOString() });
-        return sendJson(res, 200, { ok: true });
+        if (!Array.isArray(payload.ids) || payload.ids.length > 5000 || payload.ids.some((id) => !validFavoriteId(id))) throw new Error('收藏数据格式无效');
+        const nextIds = [...new Set(payload.ids)];
+        const saved = await queueFavoriteWrite((ids) => {
+          ids.clear();
+          for (const id of nextIds) ids.add(id);
+        });
+        return sendJson(res, 200, { ok: true, ...saved });
       }
       return send(res, 405, 'Method not allowed');
+    }
+
+    if (url.pathname === '/api/favorites/item') {
+      if (req.method !== 'POST') return send(res, 405, 'Method not allowed');
+      const payload = await readJsonBody(req);
+      if (!validFavoriteId(payload.id) || typeof payload.saved !== 'boolean') throw new Error('收藏数据格式无效');
+      const saved = await queueFavoriteWrite((ids) => {
+        if (payload.saved) ids.add(payload.id);
+        else ids.delete(payload.id);
+      });
+      return sendJson(res, 200, { ok: true, ...saved });
     }
 
     if (url.pathname === '/api/highlights') {
@@ -545,7 +645,7 @@ const server = http.createServer(async (req, res) => {
         const payload = await readJsonBody(req);
         const articleId = String(payload.articleId || '');
         const text = String(payload.text || '').trim().replace(/\s+/g, ' ');
-        if ((!articleId.startsWith('MP_WXS_') && !articleId.startsWith('YT_VIDEO_') && !articleId.startsWith('TW_TWEET_')) || !text || text.length > 800) throw new Error('划线内容无效');
+        if ((!articleId.startsWith('MP_WXS_') && !articleId.startsWith('YT_VIDEO_') && !articleId.startsWith('XYZ_EPISODE_') && !articleId.startsWith('TW_TWEET_')) || !text || text.length > 800) throw new Error('划线内容无效');
         const annotations = await readJson(ANNOTATIONS, { byArticle: {} });
         const existing = annotations.byArticle?.[articleId] || [];
         if (!existing.some((item) => item.text === text)) existing.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text, createdAt: new Date().toISOString() });
@@ -559,6 +659,18 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/refresh' && req.method === 'POST') {
       if (job.status === 'running') return sendJson(res, 409, { error: '已有任务正在执行', job });
       const payload = await readJsonBody(req);
+      if (payload.repairUrlsOnly === true) {
+        runFetcher('wechat_url_repair', ['--repair-urls']).catch((error) => { job = { ...job, status: 'failed', message: error.message, finishedAt: new Date().toISOString() }; });
+        job.phase = 'resolving';
+        job.message = '正在解析真实微信原文地址，不重新抓取索引…';
+        return sendJson(res, 202, { ok: true, job });
+      }
+      if (payload.archiveOnly === true) {
+        runFetcher('refresh', ['--archive-only']).catch((error) => { job = { ...job, status: 'failed', message: error.message, finishedAt: new Date().toISOString() }; });
+        job.phase = 'archiving';
+        job.message = '正在补下载本地正文与图片…';
+        return sendJson(res, 202, { ok: true, job });
+      }
       const current = await management();
       const overLimit = current.sync.remainingRuns <= 0;
       if (overLimit && payload.confirmOverLimit !== true) return sendJson(res, 409, { requiresConfirmation: true, error: `今日已拉取 ${current.sync.runsToday}/${current.sync.maxRunsPerDay} 次。额外拉取更容易触发微信读书验证，是否继续？`, management: current });
@@ -586,7 +698,8 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/youtube/subscribe' && req.method === 'POST') {
       if (job.status === 'running') return sendJson(res, 409, { error: '已有任务正在执行', job });
       const payload = await readJsonBody(req);
-      const channelUrl = String(payload.url || '').trim();
+      const channelInput = String(payload.url || '').trim();
+      const channelUrl = /^@[A-Za-z0-9._-]{3,30}$/.test(channelInput) ? `https://www.youtube.com/${channelInput}` : channelInput;
       if (!/^https?:\/\/(?:www\.|m\.)?youtube\.com\//i.test(channelUrl)) return sendJson(res, 400, { error: '请输入 YouTube 频道主页或 /videos 链接。' });
       const initialLimit = Math.min(Math.max(Number(payload.initialLimit) || 5, 1), 15);
       const result = await runYoutube('youtube_subscribe', ['subscribe', channelUrl, '--initial-limit', String(initialLimit)]);
@@ -603,6 +716,30 @@ const server = http.createServer(async (req, res) => {
       if (!(youtubeConfig.channels || []).some((channel) => channel.enabled !== false)) return sendJson(res, 400, { error: '请先添加一个 YouTube 频道。' });
       const delay = Math.min(Math.max(Number(youtubeConfig.settings?.requestIntervalSeconds) || 60, 10), 300);
       runYoutube('youtube_refresh', ['sync', '--max-new', '10', '--delay', String(delay)]).catch((error) => {
+        job = { ...job, status: 'failed', phase: 'failed', message: error.message, finishedAt: new Date().toISOString() };
+      });
+      return sendJson(res, 202, { ok: true, job });
+    }
+
+    if (url.pathname === '/api/podcast/subscribe' && req.method === 'POST') {
+      if (job.status === 'running') return sendJson(res, 409, { error: '已有任务正在执行', job });
+      const payload = await readJsonBody(req);
+      const target = String(payload.url || '').trim();
+      if (!/^https?:\/\/(?:www\.)?xiaoyuzhoufm\.com\/(?:podcast|episode)\/[A-Za-z0-9]+\/?$/i.test(target)) return sendJson(res, 400, { error: '请输入小宇宙节目主页或单集链接。' });
+      const initialLimit = Math.min(Math.max(Number(payload.initialLimit) || 3, 1), 10);
+      const result = await runPodcast('podcast_subscribe', ['subscribe', target, '--initial-limit', String(initialLimit)]);
+      let podcast;
+      try { podcast = JSON.parse(result.stdout); } catch { podcast = null; }
+      if (result.code !== 0 || !podcast?.sourceId) return sendJson(res, 422, { error: '未能解析小宇宙节目', detail: (result.stderr || result.output).slice(-1200), job });
+      await mutateGroups((current) => { current.assignments[podcast.sourceId] ||= 'group_podcast'; });
+      return sendJson(res, 200, { ok: true, podcast, management: await management() });
+    }
+
+    if (url.pathname === '/api/podcast/refresh' && req.method === 'POST') {
+      if (job.status === 'running') return sendJson(res, 409, { error: '已有任务正在执行', job });
+      const podcastConfig = await readJson(PODCAST_SUBSCRIPTIONS, { podcasts: [] });
+      if (!(podcastConfig.podcasts || []).some((podcast) => podcast.enabled !== false)) return sendJson(res, 400, { error: '请先添加一个小宇宙节目。' });
+      runPodcast('podcast_refresh', ['sync', '--max-new', '3']).catch((error) => {
         job = { ...job, status: 'failed', phase: 'failed', message: error.message, finishedAt: new Date().toISOString() };
       });
       return sendJson(res, 202, { ok: true, job });
@@ -707,7 +844,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, management: await management() });
     }
 
-    const subscription = url.pathname.match(/^\/api\/subscriptions\/(MP_WXS_\d+|YT_CHANNEL_UC[A-Za-z0-9_-]+|TW_USER_\d+)$/);
+    const subscription = url.pathname.match(/^\/api\/subscriptions\/(MP_WXS_\d+|YT_CHANNEL_UC[A-Za-z0-9_-]+|XYZ_PODCAST_[A-Za-z0-9]+|TW_USER_\d+)$/);
     if (subscription && req.method === 'DELETE') {
       if (job.status === 'running') return sendJson(res, 409, { error: '拉取或订阅任务进行中，请完成后再删除公众号' });
       const bookId = subscription[1];
@@ -748,6 +885,43 @@ const server = http.createServer(async (req, res) => {
         ]);
         await mutateGroups((current) => { delete current.assignments[bookId]; });
         return sendJson(res, 200, { ok: true, name: channel.name, removedArchives, note: deleteArchive ? `已停止订阅并删除 ${removedArchives} 份 YouTube 字幕。` : '已从书架移除；已保存的字幕 Markdown 仍保留。' });
+      }
+      if (bookId.startsWith('XYZ_PODCAST_')) {
+        const [podcastConfig, library, podcastStatus, favorites, annotations] = await Promise.all([
+          readJson(PODCAST_SUBSCRIPTIONS, { podcasts: [] }),
+          readJson(LIBRARY, { sources: [] }),
+          readJson(PODCAST_STATUS, { archived: {}, failures: {} }),
+          readJson(FAVORITES, { ids: [] }),
+          readJson(ANNOTATIONS, { byArticle: {} }),
+        ]);
+        const podcast = (podcastConfig.podcasts || []).find((entry) => entry.sourceId === bookId);
+        if (!podcast) return sendJson(res, 404, { error: '找不到该小宇宙订阅' });
+        podcastConfig.podcasts = podcastConfig.podcasts.filter((entry) => entry.sourceId !== bookId);
+        podcastConfig.updatedAt = new Date().toISOString();
+        library.sources = (library.sources || []).filter((source) => source.bookId !== bookId);
+        library.updatedAt = new Date().toISOString();
+        const articleIds = [...new Set([
+          ...Object.entries(podcastStatus.archived || {}).filter(([, entry]) => entry.sourceId === bookId).map(([id]) => id),
+          ...Object.entries(podcastStatus.failures || {}).filter(([, entry]) => entry.sourceId === bookId).map(([id]) => id),
+        ])];
+        let removedArchives = 0;
+        if (deleteArchive) {
+          for (const articleId of articleIds) {
+            const file = archiveMarkdownPath(podcastStatus.archived?.[articleId]);
+            if (file) { await fs.rm(path.dirname(file), { recursive: true, force: true }); removedArchives += 1; }
+            delete podcastStatus.archived?.[articleId];
+            delete podcastStatus.failures?.[articleId];
+            delete annotations.byArticle?.[articleId];
+          }
+          podcastStatus.updatedAt = new Date().toISOString();
+          favorites.ids = (favorites.ids || []).filter((id) => !articleIds.includes(id));
+        }
+        await Promise.all([
+          writeJson(PODCAST_SUBSCRIPTIONS, podcastConfig), writeJson(LIBRARY, library),
+          ...(deleteArchive ? [writeJson(PODCAST_STATUS, podcastStatus), writeJson(FAVORITES, favorites), writeJson(ANNOTATIONS, annotations)] : []),
+        ]);
+        await mutateGroups((current) => { delete current.assignments[bookId]; });
+        return sendJson(res, 200, { ok: true, name: podcast.name, removedArchives, note: deleteArchive ? `已停止订阅并删除 ${removedArchives} 份小宇宙逐字稿。` : '已从书架移除；已保存的逐字稿仍保留。' });
       }
       if (bookId.startsWith('TW_USER_')) {
         const [twitterConfig, library, twitterStatus, favorites, annotations] = await Promise.all([

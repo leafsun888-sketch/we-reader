@@ -38,20 +38,13 @@ class TwitterSyncTests(unittest.TestCase):
     def test_archive_tweet(self):
         with tempfile.TemporaryDirectory() as root:
             account = {"sourceId": "TW_USER_1", "name": "A", "screenName": "a"}
-            tweet = {"rid": "TW_TWEET_2", "tweetId": "2", "t": 1_700_000_000, "title": "hello", "text": "hello world", "translation": "你好，世界", "url": "https://x.com/a/status/2", "createdAt": "", "replyCount": 1, "retweetCount": 2, "favoriteCount": 3}
+            tweet = {"rid": "TW_TWEET_2", "tweetId": "2", "t": 1_700_000_000, "title": "hello", "text": "hello world", "url": "https://x.com/a/status/2", "createdAt": "", "replyCount": 1, "retweetCount": 2, "favoriteCount": 3}
             result = sync.archive_tweet(Path(root), account, tweet)
             text = (Path(root) / result["markdown"]).read_text(encoding="utf-8")
             self.assertIn("hello world", text)
-            self.assertIn("## 中文翻译", text)
-            self.assertIn("你好，世界", text)
             self.assertIn("## 英文原文", text)
+            self.assertNotIn("## 已有中文译文", text)
             self.assertIn("在 X 上查看原帖", text)
-
-    def test_translation_chunks_preserve_text(self):
-        value = "first sentence. " * 120
-        chunks = sync.translation_chunks(value, limit=120)
-        self.assertGreater(len(chunks), 1)
-        self.assertEqual("".join(chunks).replace(" ", ""), value.strip().replace(" ", ""))
 
     def test_long_tweet_word_count_and_archive_presentation(self):
         self.assertEqual(sync.english_word_count("AI-native systems don't stop."), 4)
@@ -60,17 +53,17 @@ class TwitterSyncTests(unittest.TestCase):
             tweet = {
                 "rid": "TW_TWEET_3", "tweetId": "3", "t": 1_700_000_000,
                 "title": "long original", "text": "word " * 501, "wordCount": 501,
-                "translation": "完整中文译文", "displayTitle": "长推文中文标题", "abstract": "长推文中文摘要",
+                "displayTitle": "A concise long post title", "abstract": "An English abstract of the long post.",
                 "presentationProvider": sync.PRESENTATION_PROVIDER,
                 "url": "https://x.com/a/status/3", "createdAt": "", "replyCount": 0,
                 "retweetCount": 0, "favoriteCount": 0,
             }
             result = sync.archive_tweet(Path(root), account, tweet)
             text = (Path(root) / result["markdown"]).read_text(encoding="utf-8")
-            self.assertIn("# 长推文中文标题", text)
-            self.assertIn("## 中文摘要", text)
-            self.assertIn("长推文中文摘要", text)
-            self.assertIn("## 中文翻译", text)
+            self.assertIn("# A concise long post title", text)
+            self.assertIn("## Abstract", text)
+            self.assertIn("An English abstract of the long post.", text)
+            self.assertNotIn("## 已有中文译文", text)
 
     def test_codex_environment_includes_local_node_directory(self):
         environment = sync.codex_environment(str(Path.home() / ".local" / "bin" / "codex"))
@@ -130,7 +123,7 @@ class TwitterSyncTests(unittest.TestCase):
             self.assertIn("quarantinedArchive", updated_status["filtered"]["TW_TWEET_1"])
             self.assertEqual(result["filtered"], 1)
 
-    def test_sync_filters_before_translation_and_library_merge(self):
+    def test_sync_filters_before_archive_without_translation(self):
         with tempfile.TemporaryDirectory() as root:
             data = Path(root)
             paths = sync.paths(data)
@@ -147,16 +140,14 @@ class TwitterSyncTests(unittest.TestCase):
             with (
                 mock.patch.object(sync, "fetch_public_account_with_retry", return_value=(account, [keep, drop])),
                 mock.patch.object(sync, "classify_value_queue", return_value=decisions),
-                mock.patch.object(sync, "translate_queue", return_value=({keep["rid"]: "收入因定价改变而增长 20%。"}, {keep["rid"]: sync.TERRA_PROVIDER})) as translator,
-                mock.patch.object(sync, "archive_tweet", return_value={"markdown": "文章/Twitter/a/2.md", "translatedAt": sync.now_iso()}),
+                mock.patch.object(sync, "archive_tweet", return_value={"markdown": "文章/Twitter/a/2.md", "archivedAt": sync.now_iso()}),
             ):
                 result = sync.sync(data, None, 2, 0)
-            translated_tweets = translator.call_args.args[0]
-            self.assertEqual([item["rid"] for item in translated_tweets], [keep["rid"]])
             updated_library = sync.read_json(paths["library"], {})
             items = updated_library["sources"][0]["items"]
             self.assertEqual([item["rid"] for item in items], [keep["rid"]])
             self.assertEqual(items[0]["valueDecision"], "keep")
+            self.assertNotIn("translation", items[0])
             updated_status = sync.read_json(paths["status"], {})
             self.assertIn(drop["rid"], updated_status["filtered"])
             self.assertEqual(result["filtered"], 1)

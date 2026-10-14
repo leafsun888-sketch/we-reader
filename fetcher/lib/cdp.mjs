@@ -267,6 +267,7 @@ class CdpSession {
     this.ws = ws;
     this.nextId = 1;
     this.pending = new Map();
+    this.eventHandlers = new Map();
     ws.onMessage((text) => {
       let msg;
       try {
@@ -275,11 +276,29 @@ class CdpSession {
         return;
       }
       const entry = this.pending.get(msg.id);
-      if (!entry) return;
-      this.pending.delete(msg.id);
-      if (msg.error) entry.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-      else entry.resolve(msg.result);
+      if (entry) {
+        this.pending.delete(msg.id);
+        if (msg.error) entry.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+        else entry.resolve(msg.result);
+        return;
+      }
+      if (!msg.method) return;
+      const keys = [`${msg.sessionId || ''}:${msg.method}`, `:${msg.method}`];
+      for (const key of keys) {
+        for (const handler of this.eventHandlers.get(key) || []) handler(msg.params || {});
+      }
     });
+  }
+
+  on(method, handler, sessionId = '') {
+    const key = `${sessionId}:${method}`;
+    const handlers = this.eventHandlers.get(key) || new Set();
+    handlers.add(handler);
+    this.eventHandlers.set(key, handlers);
+    return () => {
+      handlers.delete(handler);
+      if (!handlers.size) this.eventHandlers.delete(key);
+    };
   }
 
   send(method, params = {}, sessionId, timeoutMs = 60000) {
@@ -397,6 +416,43 @@ export async function evaluate(session, targetId, expression, timeoutMs = 90000)
     }
     return res.result?.value;
   } finally {
+    await session.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+  }
+}
+
+/**
+ * 微信读书网页会为文章接口动态生成 x-wrpa-0 请求头。这个值只在当前
+ * 已登录页面内短暂使用：重新加载阅读器，观察页面自己发出的首个文章请求，
+ * 取得请求头后立刻停止监听，不写入磁盘也不打印。
+ */
+export async function captureArticleRequestHeaders(session, targetId, timeoutMs = 20000) {
+  const { sessionId } = await session.send('Target.attachToTarget', { targetId, flatten: true });
+  let unsubscribe = () => {};
+  try {
+    await session.send('Network.enable', {}, sessionId);
+    const headers = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsubscribe();
+        reject(new Error('20 秒内没有观察到微信读书文章请求签名'));
+      }, timeoutMs);
+      unsubscribe = session.on('Network.requestWillBeSent', (event) => {
+        if (!event.request?.url?.includes('/web/mp/articles')) return;
+        const value = event.request.headers?.['x-wrpa-0'] || event.request.headers?.['X-Wrpa-0'];
+        if (!value) return;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve({ 'x-wrpa-0': value });
+      }, sessionId);
+      session.send('Page.reload', { ignoreCache: true }, sessionId).catch((error) => {
+        clearTimeout(timer);
+        unsubscribe();
+        reject(error);
+      });
+    });
+    return headers;
+  } finally {
+    unsubscribe();
+    await session.send('Network.disable', {}, sessionId).catch(() => {});
     await session.send('Target.detachFromTarget', { sessionId }).catch(() => {});
   }
 }

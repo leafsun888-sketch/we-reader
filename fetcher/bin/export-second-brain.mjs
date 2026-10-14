@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeWechatArticleUrl } from '../lib/wechat-url.mjs';
+import { normalizeWechatArticleUrl, canonicalWechatArticleUrl } from '../lib/wechat-url.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INPUT = path.join(ROOT, 'data', 'latest.json');
@@ -16,9 +16,11 @@ if (!fs.existsSync(INPUT)) {
 }
 
 const inputData = JSON.parse(fs.readFileSync(INPUT, 'utf8'));
+const originalUrlCache = path.join(OUTPUT, '数据', 'wechat-original-urls.json');
+const originalUrls = fs.existsSync(originalUrlCache) ? JSON.parse(fs.readFileSync(originalUrlCache, 'utf8')).byId || {} : {};
 const normalizeSource = (source) => ({
   ...source,
-  items: (source.items || []).map((item) => ({ ...item, url: normalizeWechatArticleUrl(item.url) })),
+  items: (source.items || []).map((item) => ({ ...item, url: canonicalWechatArticleUrl(originalUrls[item.rid]?.url) || normalizeWechatArticleUrl(item.url) })),
 });
 const data = { ...inputData, sources: (inputData.sources || []).map(normalizeSource) };
 const fetchedAt = new Date(data.fetchedAt);

@@ -16,10 +16,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { connectChrome, listTabs, createTab, evaluate } from '../lib/cdp.mjs';
+import { connectChrome, listTabs, createTab, evaluate, captureArticleRequestHeaders } from '../lib/cdp.mjs';
 import { PROBE_JS, buildFetchJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
 import { resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
+import { resolveSourceUrls } from '../lib/original-urls.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -226,6 +227,18 @@ function toMarkdown(sources) {
 }
 
 async function main() {
+  if (has('--repair-urls')) {
+    const child = spawn(process.execPath, [path.join(ROOT, 'bin', 'resolve-original-urls.mjs')], { cwd: ROOT, stdio: 'inherit' });
+    process.exitCode = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', code => resolve(code || 0)); });
+    return;
+  }
+  if (has('--archive-only')) {
+    const result = await runArchiveWithProgress();
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr.split(/\r?\n/).filter(line => !line.startsWith('WE_READ_ARCHIVE_PROGRESS ')).join('\n'));
+    process.exitCode = result.status === 0 ? 0 : 1;
+    return;
+  }
   const cfg = loadConfig();
 
   if (has('--quota')) {
@@ -318,10 +331,12 @@ async function main() {
       return;
     }
     const checkpointedAccounts = accountsWithCheckpoint(selectedAccounts, cfg.libraryPath);
+    const requestHeaders = await captureArticleRequestHeaders(session, targetId);
     const js = buildFetchJs(checkpointedAccounts, cfg.requestIntervalMs, {
       initialArticleLimit: cfg.initialArticleLimit,
       forceHistoryLimit: requestedHistory,
       maxIncrementalPages: cfg.maxIncrementalPages,
+      requestHeaders,
     });
     // 一次同步会按账号串行拉取，首次导入还可能翻多页。默认的 CDP
     // 超时不足以覆盖十几个号的首轮同步，会导致浏览器仍在执行而本机
@@ -346,6 +361,7 @@ async function main() {
     }
 
     quota.commit(cfg.statePath);
+    await resolveSourceUrls(session, targetId, requestHeaders, result.sources, path.resolve(ROOT, '../data/数据/wechat-original-urls.json'), cfg.requestIntervalMs);
     // 保留最近一次成功的原始结果，便于本地 RSS / Second Brain 导出，
     // 不额外发起网络请求。
     const dataDir = path.join(ROOT, 'data');

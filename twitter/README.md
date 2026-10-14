@@ -35,7 +35,8 @@ cd twitter
 ## Agent value gate
 
 Every new candidate is reviewed by Terra with medium reasoning before
-translation or archiving. Only `keep` decisions enter the library. The gate is
+archiving. Only `keep` decisions enter the library. New tweets retain their
+original language without automatic full translation. The gate is
 fail-closed: an incomplete agent result stops that sync instead of allowing
 unreviewed tweets through. It does not use keyword or engagement thresholds as
 a substitute for reading the tweet.

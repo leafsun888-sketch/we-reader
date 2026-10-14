@@ -16,7 +16,6 @@ import sys
 import tempfile
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +26,10 @@ PROJECT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = PROJECT / "data"
 SCREEN_NAME = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 TWITTER_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}
-TRANSLATION_SCHEMA = Path(__file__).with_name("translation.schema.json")
 PRESENTATION_SCHEMA = Path(__file__).with_name("presentation.schema.json")
 VALUE_FILTER_SCHEMA = Path(__file__).with_name("value-filter.schema.json")
 TERRA_MODEL = "gpt-5.6-terra"
-TERRA_PROVIDER = f"{TERRA_MODEL}/low"
-PRESENTATION_PROVIDER = TERRA_PROVIDER
+PRESENTATION_PROVIDER = f"{TERRA_MODEL}/low"
 VALUE_FILTER_PROVIDER = f"{TERRA_MODEL}/medium"
 VALUE_FILTER_VERSION = 1
 LONG_TWEET_WORD_THRESHOLD = 500
@@ -265,8 +262,6 @@ def subscribe(data_root: Path, value: str, initial_limit: int) -> dict[str, Any]
     settings.setdefault("requestIntervalSeconds", 5)
     settings.setdefault("openRefreshCooldownMinutes", 30)
     settings.setdefault("scheduleLocalTimes", ["12:00", "20:00"])
-    settings.setdefault("translationProvider", TERRA_PROVIDER)
-    settings.setdefault("translationFallback", "google")
     settings.setdefault("highFrequencyWindowDays", HIGH_FREQUENCY_WINDOW_DAYS)
     settings.setdefault("lowFrequencyWindowDays", LOW_FREQUENCY_WINDOW_DAYS)
     config["updatedAt"] = now_iso()
@@ -299,45 +294,6 @@ def safe_name(value: str) -> str:
     return re.sub(r"\s+", " ", clean).strip(" .-")[:100] or "tweet"
 
 
-def translation_chunks(value: str, limit: int = 1200) -> list[str]:
-    chunks: list[str] = []
-    remaining = value.strip()
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        cut = max(remaining.rfind("\n", 0, limit), remaining.rfind(". ", 0, limit), remaining.rfind(" ", 0, limit))
-        if cut < limit // 2:
-            cut = limit
-        else:
-            cut += 1
-        chunks.append(remaining[:cut].strip())
-        remaining = remaining[cut:].strip()
-    return chunks
-
-
-def translate_with_google(value: str) -> str:
-    translated: list[str] = []
-    for chunk in translation_chunks(value):
-        query = urllib.parse.urlencode({
-            "client": "gtx", "sl": "auto", "tl": "zh-CN", "dt": "t", "q": chunk,
-        })
-        request = urllib.request.Request(
-            f"https://translate.googleapis.com/translate_a/single?{query}",
-            headers={"User-Agent": "We-Read/1.0"},
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        text = "".join(str(segment[0] or "") for segment in (payload[0] or []) if segment)
-        if not text.strip():
-            raise RuntimeError("翻译服务返回空结果")
-        translated.append(text.strip())
-    result = "\n\n".join(translated).strip()
-    if not result:
-        raise RuntimeError("没有可翻译的推文正文")
-    return result
-
-
 def codex_binary() -> str:
     binary = shutil.which("codex")
     if binary:
@@ -345,7 +301,7 @@ def codex_binary() -> str:
     fallback = Path.home() / ".local" / "bin" / "codex"
     if fallback.is_file():
         return str(fallback)
-    raise RuntimeError("找不到 Codex CLI，无法调用 Terra 翻译")
+    raise RuntimeError("找不到 Codex CLI，无法调用 Twitter 审核 Agent")
 
 
 def codex_environment(binary: str) -> dict[str, str]:
@@ -450,96 +406,22 @@ def apply_value_decision(tweet: dict[str, Any], decision: dict[str, Any]) -> Non
     })
 
 
-def translate_with_terra(tweets: list[dict[str, Any]]) -> dict[str, str]:
-    if not tweets:
-        return {}
-    payload = [{"id": item["rid"], "text": item["text"]} for item in tweets]
-    prompt = """你是 Twitter 推文翻译器。把输入 JSON 中每条 text 忠实翻译为自然、简洁的简体中文。
-完整保留 @账号、URL、话题标签、数字、产品名、人名、技术名词和署名，不添加解释或原文没有的信息；
-尽量保留原文语气、修辞、短句节奏及不确定性，避免生硬直译。输出必须符合给定 JSON Schema，id 原样返回。
-
-输入：
-""" + json.dumps(payload, ensure_ascii=False)
-    output_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(prefix="we-read-twitter-translation-", suffix=".json", delete=False) as output:
-            output_path = output.name
-        command = [
-            codex_binary(), "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
-            "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(PROJECT),
-            "-m", TERRA_MODEL, "-c", 'model_reasoning_effort="low"', "--color", "never",
-            "--output-schema", str(TRANSLATION_SCHEMA), "-o", output_path, "-",
-        ]
-        result = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=240,
-            check=False,
-            env=codex_environment(command[0]),
-        )
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "Terra 翻译失败")[-1200:])
-        parsed = json.loads(Path(output_path).read_text(encoding="utf-8"))
-        translations = {
-            str(item.get("id")): str(item.get("translation") or "").strip()
-            for item in parsed.get("translations", []) if item.get("id") and item.get("translation")
-        }
-        missing = [item["rid"] for item in tweets if not translations.get(item["rid"])]
-        if missing:
-            raise RuntimeError(f"Terra 未返回 {len(missing)} 条翻译")
-        return translations
-    finally:
-        if output_path:
-            Path(output_path).unlink(missing_ok=True)
-
-
-def translate_queue(tweets: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, str]]:
-    translations: dict[str, str] = {}
-    providers: dict[str, str] = {}
-    batch: list[dict[str, Any]] = []
-    batch_chars = 0
-    batches: list[list[dict[str, Any]]] = []
-    for tweet in tweets:
-        length = len(tweet.get("text", ""))
-        if batch and (len(batch) >= 12 or batch_chars + length > 18000):
-            batches.append(batch)
-            batch, batch_chars = [], 0
-        batch.append(tweet)
-        batch_chars += length
-    if batch:
-        batches.append(batch)
-    for current in batches:
-        try:
-            result = translate_with_terra(current)
-            for tweet in current:
-                translations[tweet["rid"]] = result[tweet["rid"]]
-                providers[tweet["rid"]] = TERRA_PROVIDER
-        except Exception as error:
-            print(f"Terra 批量翻译失败，改用 Google 回退：{error}", file=sys.stderr)
-            for tweet in current:
-                translations[tweet["rid"]] = translate_with_google(tweet["text"])
-                providers[tweet["rid"]] = "google-fallback"
-    return translations, providers
-
-
 def generate_presentations_with_terra(tweets: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
     if not tweets:
         return {}
     payload = [{
         "id": item["rid"],
-        "translation": item["translation"],
+        "text": item["text"],
         "wordCount": int(item.get("wordCount") or english_word_count(item.get("text", ""))),
     } for item in tweets]
-    prompt = """你是 Twitter 长文的信息架构编辑。输入是已经忠实翻译成中文、且英文原文超过 500 词的长推文。
-为每条生成：
-1. displayTitle：准确、克制的简体中文标题，尽量不超过 35 个汉字；
-2. abstract：120-220 个汉字的中文摘要，覆盖核心主张、关键依据与结论。
-必须保留重要人名、产品名、技术词、数字和不确定性；不要评价、拔高、补充背景或添加原文没有的信息。
-id 必须原样返回，输出必须符合给定 JSON Schema。
+    prompt = """You are the information architect for long Twitter posts. The input contains original English posts longer than 500 words.
+For each post, generate:
+1. displayTitle: an accurate, restrained English title, ideally no more than 12 words;
+2. abstract: a 70-120 word English abstract covering the core claim, evidence, and conclusion.
+Preserve important names, products, technical terms, numbers, and uncertainty. Do not add facts or commentary.
+Return each id unchanged and follow the provided JSON Schema.
 
-输入：
+Input:
 """ + json.dumps(payload, ensure_ascii=False)
     output_path = ""
     try:
@@ -580,7 +462,7 @@ def presentation_queue(tweets: list[dict[str, Any]]) -> dict[str, dict[str, str]
     batch: list[dict[str, Any]] = []
     batch_chars = 0
     for tweet in tweets:
-        length = len(tweet.get("translation", ""))
+        length = len(tweet.get("text", ""))
         if batch and (len(batch) >= 4 or batch_chars + length > 28000):
             batches.append(batch)
             batch, batch_chars = [], 0
@@ -592,14 +474,12 @@ def presentation_queue(tweets: list[dict[str, Any]]) -> dict[str, dict[str, str]
         try:
             presentations.update(generate_presentations_with_terra(current))
         except Exception as error:
-            print(f"长推文标题摘要生成失败，将暂时显示完整中文译文：{error}", file=sys.stderr)
+            print(f"长推文标题摘要生成失败，将暂时显示完整英文原文：{error}", file=sys.stderr)
     return presentations
 
 
 def archive_tweet(data_root: Path, account: dict[str, Any], tweet: dict[str, Any]) -> dict[str, Any]:
     translation = str(tweet.get("translation") or "").strip()
-    if not translation:
-        raise RuntimeError("推文尚未完成中文翻译")
     word_count = int(tweet.get("wordCount") or english_word_count(tweet.get("text", "")))
     tweet["wordCount"] = word_count
     display_title = str(tweet.get("displayTitle") or "").strip()
@@ -620,7 +500,6 @@ def archive_tweet(data_root: Path, account: dict[str, Any], tweet: dict[str, Any
         f"published_at: {json.dumps(tweet.get('createdAt', ''))}",
         f"language: {json.dumps(tweet.get('language', ''))}",
         f"word_count: {word_count}",
-        f"translation_provider: {json.dumps(tweet.get('translationProvider', ''))}",
         f"presentation_provider: {json.dumps(tweet.get('presentationProvider', ''))}",
         f"value_decision: {json.dumps(tweet.get('valueDecision', ''))}",
         f"value_filter_provider: {json.dumps(tweet.get('valueFilterProvider', ''))}",
@@ -630,9 +509,8 @@ def archive_tweet(data_root: Path, account: dict[str, Any], tweet: dict[str, Any
         f"captured_at: {json.dumps(now_iso())}",
         "---", "",
         f"# {display_title if has_long_presentation else tweet['title']}", "",
-        *(["## 中文摘要", "", abstract, ""] if has_long_presentation else []),
-        "## 中文翻译", "",
-        translation, "",
+        *(["## Abstract", "", abstract, ""] if has_long_presentation else []),
+        *(["## 已有中文译文", "", translation, ""] if translation else []),
         "## 英文原文", "",
         tweet["text"], "",
         f"> [在 X 上查看原帖]({tweet['url']}) · {tweet['replyCount']} 回复 · {tweet['retweetCount']} 转发 · {tweet['favoriteCount']} 喜欢", "",
@@ -641,7 +519,7 @@ def archive_tweet(data_root: Path, account: dict[str, Any], tweet: dict[str, Any
     return {
         "sourceId": account["sourceId"], "account": account["name"], "title": display_title if has_long_presentation else tweet["title"],
         "url": tweet["url"], "markdown": str(target.relative_to(data_root)), "archivedAt": now_iso(),
-        "translatedAt": now_iso(), **({"presentedAt": now_iso()} if has_long_presentation else {}),
+        **({"presentedAt": now_iso()} if has_long_presentation else {}),
     }
 
 
@@ -707,9 +585,7 @@ def sync(data_root: Path, source_id: str | None, max_new: int, delay: float) -> 
                 existing_item = existing_items.get(item["rid"], {})
                 existing_item["wordCount"] = int(existing_item.get("wordCount") or english_word_count(existing_item.get("text", "")))
                 if item["rid"] in existing_ids and (
-                    not existing_item.get("translation")
-                    or not archived_entry.get("translatedAt")
-                    or existing_item.get("translationProvider") != TERRA_PROVIDER
+                    not archived_entry
                     or (is_long_tweet(existing_item) and (not existing_item.get("displayTitle") or not existing_item.get("abstract")))
                 ):
                     candidates.append(item)
@@ -753,10 +629,7 @@ def sync(data_root: Path, source_id: str | None, max_new: int, delay: float) -> 
     write_json(files["status"], status)
     completed = archived = failed = 0
     emit_progress(0, len(queue), 0, 0)
-    translations, translation_providers = translate_queue([tweet for _, tweet in queue])
     for _, tweet in queue:
-        tweet["translation"] = translations[tweet["rid"]]
-        tweet["translationProvider"] = translation_providers[tweet["rid"]]
         tweet["wordCount"] = int(tweet.get("wordCount") or english_word_count(tweet.get("text", "")))
     presentation_candidates = [
         tweet for _, tweet in queue
@@ -807,7 +680,7 @@ def backfill_presentations(data_root: Path) -> dict[str, int]:
         for tweet in source.get("items", []):
             scanned += 1
             tweet["wordCount"] = int(tweet.get("wordCount") or english_word_count(tweet.get("text", "")))
-            if is_long_tweet(tweet) and tweet.get("translation") and (not tweet.get("displayTitle") or not tweet.get("abstract")):
+            if is_long_tweet(tweet) and (not tweet.get("displayTitle") or not tweet.get("abstract")):
                 candidates.append((account, tweet))
     presentations = presentation_queue([tweet for _, tweet in candidates])
     generated = 0

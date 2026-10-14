@@ -36,44 +36,63 @@
         <button data-tab="shelf" class="tab">全部书架</button>
         <button data-tab="twitter" class="tab">Twitter</button>
         <button data-tab="youtube" class="tab">YouTube</button>
+        <button data-tab="podcast" class="tab">小宇宙</button>
         <button data-tab="dashboards" class="tab">超级大盘</button>
       </nav>
       <section id="content" class="content" aria-live="polite"></section>
     </main>
-    <dialog id="subscribe-dialog" class="modal">
-      <form method="dialog" class="modal-card" id="subscribe-form">
+    <dialog id="subscription-dialog" class="modal subscription-modal">
+      <div class="modal-card">
         <button class="modal-close" type="button" aria-label="关闭">×</button>
-        <p class="eyebrow">ADD A PUBLIC ACCOUNT</p>
-        <h2>添加公众号</h2>
-        <p>粘贴该公众号任意一篇文章链接。系统会在本机解析公众号身份、加入书架，并在下次刷新时抓取文章。</p>
-        <label>文章链接<input id="article-url" name="url" type="url" required placeholder="https://mp.weixin.qq.com/s/..." /></label>
-        <button class="primary-button" type="submit">解析并订阅</button>
-        <p id="subscribe-note" class="form-note"></p>
-      </form>
-    </dialog>
-    <dialog id="youtube-dialog" class="modal">
-      <form method="dialog" class="modal-card" id="youtube-form">
-        <button class="modal-close" type="button" aria-label="关闭">×</button>
-        <p class="eyebrow">ADD A YOUTUBE CHANNEL</p>
-        <h2>添加 YouTube 频道</h2>
-        <p>粘贴频道主页或 /videos 链接。频道会进入 Youtube 分组；点击“同步 YouTube”后导入最新视频和可用字幕。</p>
-        <label>频道链接<input id="youtube-url" name="url" type="url" required placeholder="https://www.youtube.com/@channel" /></label>
-        <label>首次导入视频数量<input id="youtube-initial-limit" type="number" min="1" max="15" value="5" required /></label>
-        <button class="primary-button" type="submit">解析并订阅</button>
-        <p id="youtube-note" class="form-note"></p>
-      </form>
-    </dialog>
-    <dialog id="twitter-dialog" class="modal">
-      <form method="dialog" class="modal-card" id="twitter-form">
-        <button class="modal-close" type="button" aria-label="关闭">×</button>
-        <p class="eyebrow">ADD A TWITTER ACCOUNT</p>
-        <h2>添加 Twitter 账号</h2>
-        <p>输入 @用户名或 x.com 用户主页。这里只订阅公开推文到本地书架，不会操作你的 Twitter 账号，也不需要登录。</p>
-        <label>账号<input id="twitter-account" name="account" type="text" required placeholder="@karpathy" /></label>
-        <label>首次导入推文数量<input id="twitter-initial-limit" type="number" min="1" max="20" value="10" required /></label>
-        <button class="primary-button" type="submit">解析并订阅</button>
-        <p id="twitter-note" class="form-note"></p>
-      </form>
+        <p class="eyebrow">ADD A SUBSCRIPTION</p>
+        <h2>增加订阅</h2>
+        <p>选择来源类型，再粘贴链接或输入账号。这里只写入你的本地书架，不会替你在原平台点击关注。</p>
+        <div class="subscription-picker four" role="tablist" aria-label="订阅来源类型">
+          <button type="button" role="tab" data-subscription-type="wechat" aria-selected="true">微信公众号</button>
+          <button type="button" role="tab" data-subscription-type="twitter" aria-selected="false">Twitter</button>
+          <button type="button" role="tab" data-subscription-type="youtube" aria-selected="false">YouTube</button>
+          <button type="button" role="tab" data-subscription-type="podcast" aria-selected="false">小宇宙</button>
+        </div>
+        <section class="subscription-panel" data-subscription-panel="wechat">
+          <form id="subscribe-form">
+            <h3>订阅微信公众号</h3>
+            <p>打开该公众号任意一篇文章，复制文章链接并粘贴到这里。系统会自动识别公众号。</p>
+            <label>公众号文章链接<input id="article-url" name="url" type="url" required placeholder="https://mp.weixin.qq.com/s/..." /></label>
+            <button class="primary-button" type="submit">解析并加入书架</button>
+            <p id="subscribe-note" class="form-note"></p>
+          </form>
+        </section>
+        <section class="subscription-panel" data-subscription-panel="twitter" hidden>
+          <form id="twitter-form">
+            <h3>订阅 Twitter 账号</h3>
+            <p>输入用户名（如 <code>@karpathy</code>）或个人主页链接（如 <code>x.com/karpathy</code>）。这是本地订阅，不会在 X 上替你关注账号；同步会使用本机已保存的登录状态。</p>
+            <label>Twitter 用户名或主页<input id="twitter-account" name="account" type="text" required placeholder="@karpathy 或 https://x.com/karpathy" /></label>
+            <label>首次导入推文数量<input id="twitter-initial-limit" type="number" min="1" max="20" value="10" required /></label>
+            <button class="primary-button" type="submit">解析并加入书架</button>
+            <p id="twitter-note" class="form-note"></p>
+          </form>
+        </section>
+        <section class="subscription-panel" data-subscription-panel="youtube" hidden>
+          <form id="youtube-form">
+            <h3>订阅 YouTube 频道</h3>
+            <p>在频道首页复制网址，或直接输入频道的 <code>@handle</code>。请使用频道主页，而不是单个视频链接。</p>
+            <label>频道主页或 @handle<input id="youtube-url" name="url" type="text" required placeholder="https://www.youtube.com/@channel 或 @channel" /></label>
+            <label>首次导入视频数量<input id="youtube-initial-limit" type="number" min="1" max="15" value="5" required /></label>
+            <button class="primary-button" type="submit">解析并加入书架</button>
+            <p id="youtube-note" class="form-note"></p>
+          </form>
+        </section>
+        <section class="subscription-panel" data-subscription-panel="podcast" hidden>
+          <form id="podcast-form">
+            <h3>订阅小宇宙节目</h3>
+            <p>直接粘贴小宇宙节目主页；也兼容任意一期单集链接，系统会自动找到所属节目。无需另外提供 RSS。</p>
+            <label>节目主页或单集链接<input id="podcast-url" name="url" type="url" required placeholder="https://www.xiaoyuzhoufm.com/podcast/..." /></label>
+            <label>首次导入单集数量<input id="podcast-initial-limit" type="number" min="1" max="10" value="3" required /></label>
+            <button class="primary-button" type="submit">解析并加入书架</button>
+            <p id="podcast-note" class="form-note"></p>
+          </form>
+        </section>
+      </div>
     </dialog>
     <dialog id="dashboard-dialog" class="modal">
       <form method="dialog" class="modal-card" id="dashboard-form">

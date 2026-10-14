@@ -22,12 +22,11 @@ python3 -m venv .venv
 .venv/bin/python sync.py backfill-metadata --delay 1
 ```
 
-Videos without captions are kept in the We-Read index and recorded as
-retryable transcript failures. Available English subtitles are preferred, then
-translated by Terra low and stored as one Markdown article with Chinese first
-and English second. To reduce full-agent overhead, adjacent captions are
-coalesced into roughly 5,000-character segments and each Terra call is capped
-at eight segments / 40,000 characters. Google fallback splits long segments
-again before requesting translation. Local Whisper fallback is intentionally not
-enabled in the first version because it downloads audio and model weights;
-it will be added as an optional second-stage worker.
+Videos without captions remain in the index with retryable transcript failures.
+Available English subtitles are preferred and saved locally. Terra medium
+generates a paragraph-based Chinese manuscript, aiming to preserve information
+and sentence order while repairing subtitle fragmentation. Terra high generates
+a one-paragraph summary. Chinese text appears before the original English
+transcript, with links to the source video. Model calls require a logged-in
+Codex CLI and consume its configured account quota. YouTube audio-to-Whisper
+fallback is not enabled.

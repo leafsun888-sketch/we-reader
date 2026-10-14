@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "titleZh": {"type": "string"},
+    "paragraphs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sourceIds": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "text": {"type": "string"}
+        },
+        "required": ["sourceIds", "text"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["titleZh", "paragraphs"],
+  "additionalProperties": false
+}

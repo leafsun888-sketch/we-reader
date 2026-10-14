@@ -67,6 +67,7 @@ export const PROBE_JS = `(function(){
  */
 export function buildFetchJs(accounts, intervalMs = 3000, options = {}) {
   const list = JSON.stringify(accounts.map((a) => [a.name, a.bookId, Number(a.since || 0), a.knownIds || []]));
+  const requestHeaders = JSON.stringify(options.requestHeaders || {});
   const initialLimit = Math.max(1, Number(options.initialArticleLimit || 50));
   const forceHistoryLimit = Math.max(0, Number(options.forceHistoryLimit || 0));
   const maxIncrementalPages = Math.max(1, Number(options.maxIncrementalPages || 8));
@@ -76,6 +77,7 @@ export function buildFetchJs(accounts, intervalMs = 3000, options = {}) {
   var INITIAL_LIMIT = ${initialLimit};
   var FORCED_HISTORY_LIMIT = ${forceHistoryLimit};
   var MAX_INCREMENTAL_PAGES = ${maxIncrementalPages};
+  var REQUEST_HEADERS = ${requestHeaders};
   var FALLBACK_PAGE_STEP = 20;
 
   function flatten(o){
@@ -123,7 +125,7 @@ export function buildFetchJs(accounts, intervalMs = 3000, options = {}) {
       return pause().then(function(){ return one(i + 1, acc); });
     }
     function next(){
-      return fetch('/web/mp/articles?bookId=' + bookId + '&offset=' + offset, {credentials:'include'})
+      return fetch('/web/mp/articles?bookId=' + bookId + '&offset=' + offset, {credentials:'include', headers:REQUEST_HEADERS})
         .then(function(r){ return r.json(); })
         .then(function(o){
           if (o.errCode) { acc.push({name:name, bookId:bookId, err:'errCode=' + o.errCode}); return pause().then(function(){ return one(i + 1, acc); }); }

@@ -1,4 +1,4 @@
-const state = { library: { sources: [], updatedAt: null }, management: { accounts: [], groups: [], settings: {}, job: {} }, dashboards: { items: [], updatedAt: null }, appVersion: null, tab: 'today', sourceId: null, favorites: new Set(), highlights: {}, reader: null, pendingRemoval: null, selectedText: '', selectionRange: null, movingSources: new Set(), moveVersions: new Map(), announcedLibraryVersion: null, twitterVisibleCount: 30, twitterTagFilter: '低频' };
+const state = { library: { sources: [], updatedAt: null }, management: { accounts: [], groups: [], settings: {}, job: {} }, dashboards: { items: [], updatedAt: null }, appVersion: null, tab: 'today', sourceId: null, favorites: new Set(), favoriteWriteVersions: new Map(), highlights: {}, reader: null, pendingRemoval: null, selectedText: '', selectionRange: null, movingSources: new Set(), moveVersions: new Map(), announcedLibraryVersion: null, twitterVisibleCount: 30, twitterTagFilter: '低频', twitterPersonFilter: 'all' };
 const TWITTER_PAGE_SIZE = 30;
 const TWITTER_TAGS = ['低频', '高频'];
 const TWITTER_TAG_WINDOWS = { 高频: 14, 低频: 60 };
@@ -10,9 +10,7 @@ const syncStatus = document.querySelector('#sync-status');
 const jobProgress = document.querySelector('#job-progress');
 const jobProgressFill = document.querySelector('#job-progress-fill');
 const jobProgressLabel = document.querySelector('#job-progress-label');
-const subscribeDialog = document.querySelector('#subscribe-dialog');
-const youtubeDialog = document.querySelector('#youtube-dialog');
-const twitterDialog = document.querySelector('#twitter-dialog');
+const subscriptionDialog = document.querySelector('#subscription-dialog');
 const dashboardDialog = document.querySelector('#dashboard-dialog');
 const settingsDialog = document.querySelector('#settings-dialog');
 const removeDialog = document.querySelector('#remove-dialog');
@@ -31,23 +29,24 @@ const publishedDesc = (a, b) => {
   return String(b.rid || b.url || '').localeCompare(String(a.rid || a.url || ''), 'en', { numeric: true });
 };
 const allArticles = () => state.library.sources.flatMap((source) => source.items.map((item) => ({ ...item, source: source.name, bookId: source.bookId, platform: source.platform || 'wechat' }))).sort(publishedDesc);
-const allTwitterArticles = () => {
+const allTwitterArticles = ({ tag = state.twitterTagFilter, personId = state.twitterPersonFilter } = {}) => {
   const preferences = new Map((state.management.accounts || []).filter((account) => account.platform === 'twitter').map((account) => [account.bookId, account]));
   return allArticles().filter((article) => {
     if (article.platform !== 'twitter') return false;
     if (article.valueDecision !== 'keep') return false;
     const account = preferences.get(article.bookId);
     if (account?.mutedInFeed) return false;
-    if ((account?.feedTag || '低频') !== state.twitterTagFilter) return false;
-    const days = TWITTER_TAG_WINDOWS[state.twitterTagFilter] || 14;
+    if ((account?.feedTag || '低频') !== tag) return false;
+    if (personId !== 'all' && article.bookId !== personId) return false;
+    const days = TWITTER_TAG_WINDOWS[tag] || 14;
     return article.t * 1000 >= cutoff(days);
   });
 };
-const allYoutubeArticles = () => allArticles().filter((article) => article.platform === 'youtube');
+const allLongformArticles = (platform = null) => allArticles().filter((article) => platform ? article.platform === platform : ['youtube', 'podcast'].includes(article.platform));
 const cutoff = (days) => Date.now() - days * 24 * 60 * 60 * 1000;
 const sourceById = (id) => state.library.sources.find((source) => source.bookId === id);
 const articleId = (article) => article.rid || article.url;
-const publicArticleUrl = (value) => String(value || '').replace(
+const publicArticleUrl = (value) => /^https:\/\/mp\.weixin\.qq\.com\/s\/WR1[^/?#]{30,}/i.test(String(value || '')) ? '' : String(value || '').replace(
   /^(https:\/\/mp\.weixin\.qq\.com\/s\/)([^/?#]+)(.*)$/i,
   (_, prefix, token, suffix) => `${prefix}${token.replaceAll('~', '_')}${suffix}`
 );
@@ -66,8 +65,11 @@ function notify(message, kind = 'normal') {
 }
 function jobLabel(job) {
   if (job.status === 'running') {
+    if (job.kind === 'wechat_url_repair') return '正在修复微信原文链接…';
     if (job.kind === 'youtube_refresh') return job.phase === 'archiving' ? 'YouTube 字幕归档中…' : '正在检查 YouTube 更新…';
     if (job.kind === 'youtube_subscribe') return '正在解析 YouTube 频道…';
+    if (job.kind === 'podcast_refresh') return job.phase === 'archiving' ? '小宇宙转录归档中…' : '正在检查小宇宙更新…';
+    if (job.kind === 'podcast_subscribe') return '正在解析小宇宙节目…';
     if (job.kind === 'twitter_refresh') return job.phase === 'archiving' ? 'Twitter 推文归档中…' : '正在检查 Twitter 更新…';
     if (job.kind === 'twitter_subscribe') return '正在解析 Twitter 账号…';
     if (job.phase === 'archiving') return '新文章已显示 · 后台归档中…';
@@ -92,7 +94,7 @@ function jobFailure(job) {
   return lines.slice(-2).join(' ') || job?.message || '同步未完成';
 }
 function updateJobProgress(job) {
-  const visible = job?.status === 'running' && ['refresh', 'youtube_refresh', 'twitter_refresh'].includes(job?.kind);
+  const visible = job?.status === 'running' && ['refresh', 'youtube_refresh', 'podcast_refresh', 'twitter_refresh'].includes(job?.kind);
   jobProgress.hidden = !visible;
   if (!visible) return;
   const progress = job.progress || {};
@@ -100,7 +102,7 @@ function updateJobProgress(job) {
   jobProgress.classList.toggle('indeterminate', indeterminate);
   if (indeterminate) {
     jobProgressFill.style.width = '';
-    jobProgressLabel.textContent = progress.stage === 'archiving' ? (job.kind === 'youtube_refresh' ? '准备字幕…' : job.kind === 'twitter_refresh' ? '准备推文…' : '准备归档…') : (job.kind === 'youtube_refresh' ? '频道索引处理中…' : job.kind === 'twitter_refresh' ? '账号索引处理中…' : '索引处理中…');
+    jobProgressLabel.textContent = progress.stage === 'archiving' ? (job.kind === 'youtube_refresh' ? '准备字幕…' : job.kind === 'podcast_refresh' ? '准备音频转录…' : job.kind === 'twitter_refresh' ? '准备推文…' : '准备归档…') : (job.kind === 'youtube_refresh' ? '频道索引处理中…' : job.kind === 'podcast_refresh' ? '节目索引处理中…' : job.kind === 'twitter_refresh' ? '账号索引处理中…' : '索引处理中…');
     jobProgress.removeAttribute('aria-valuenow');
     jobProgress.removeAttribute('aria-valuemax');
     jobProgress.setAttribute('aria-valuetext', jobProgressLabel.textContent);
@@ -110,7 +112,7 @@ function updateJobProgress(job) {
   const completed = Math.min(total, Math.max(0, Number(progress.completed) || 0));
   const percent = total === 0 ? 100 : Math.round((completed / total) * 100);
   jobProgressFill.style.width = `${percent}%`;
-  jobProgressLabel.textContent = total === 0 ? '无需新增归档' : `${job.kind === 'youtube_refresh' ? '字幕' : job.kind === 'twitter_refresh' ? '推文' : '归档'} ${completed} / ${total}`;
+  jobProgressLabel.textContent = total === 0 ? '无需新增归档' : `${job.kind === 'youtube_refresh' ? '字幕' : job.kind === 'podcast_refresh' ? '单集' : job.kind === 'twitter_refresh' ? '推文' : '归档'} ${completed} / ${total}`;
   jobProgress.setAttribute('aria-valuenow', String(completed));
   jobProgress.setAttribute('aria-valuemax', String(total));
   jobProgress.setAttribute('aria-valuetext', jobProgressLabel.textContent);
@@ -131,12 +133,23 @@ function updateHeader() {
   refreshButton.textContent = running ? '↻ 正在拉取…' : reachedLimit ? '↻ 仍要拉取' : '↻ 拉取更新';
 }
 function articleRow(article) {
+  if (['youtube', 'podcast'].includes(article.platform)) return longformRow(article);
   const id = articleId(article);
   const saved = state.favorites.has(id);
   const localReader = article.platform === 'youtube' ? `<button class="local-reader-button" data-local-article="${esc(id)}" aria-label="打开本地字幕：${esc(article.title)}">字幕</button>` : article.platform === 'twitter' ? `<button class="local-reader-button" data-local-article="${esc(id)}" aria-label="打开本地推文：${esc(article.title)}">正文</button>` : '';
   const permanentDelete = article.platform === 'twitter' ? `<button class="twitter-delete-button" data-delete-twitter="${esc(id)}" aria-label="彻底删除推文：${esc(article.title)}" title="从书库和本地归档中彻底删除">−</button>` : '';
   const openLabel = article.platform === 'youtube' ? '观看 YouTube 视频' : article.platform === 'twitter' ? '打开 X 原帖' : '打开微信原文';
-  return `<div class="article-row"><a class="article-link" href="${esc(publicArticleUrl(article.url))}" target="_blank" rel="noopener noreferrer" aria-label="${openLabel}：${esc(article.title)}"><span class="article-source">${esc(article.source)}</span><span class="article-title">${esc(article.title)}</span><time>${dt(article.t)}</time></a>${localReader}<button class="favorite-button${saved ? ' saved' : ''}" data-favorite="${esc(id)}" aria-label="${saved ? '取消收藏' : '收藏文章'}" aria-pressed="${saved}">${saved ? '★' : '☆'}</button>${permanentDelete}</div>`;
+  const url = publicArticleUrl(article.url);
+  const copy = `<span class="article-source">${esc(article.source)}</span><span class="article-title">${esc(article.title)}${url ? '' : '（原文链接待解析）'}</span><time>${dt(article.t)}</time>`;
+  const main = url ? `<a class="article-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="${openLabel}：${esc(article.title)}">${copy}</a>` : `<span class="article-link" title="暂未取得真实微信原文地址，不使用无效链接跳转">${copy}</span>`;
+  return `<div class="article-row">${main}${localReader}<button class="favorite-button${saved ? ' saved' : ''}" data-favorite="${esc(id)}" aria-label="${saved ? '取消收藏' : '收藏文章'}" aria-pressed="${saved}">${saved ? '★' : '☆'}</button>${permanentDelete}</div>`;
+}
+function longformRow(article) {
+  const id = articleId(article);
+  const saved = state.favorites.has(id);
+  const youtube = article.platform === 'youtube';
+  const summary = article.summary || article.description || '文字归档完成后会在这里显示 Terra High 生成的一段梗概。';
+  return `<article class="longform-row"><button class="longform-main" data-local-article="${esc(id)}" aria-label="阅读文字：${esc(article.title)}"><span class="longform-source">${esc(article.source)} · ${youtube ? 'YouTube' : '小宇宙'}</span><span class="longform-copy"><strong>${esc(article.title)}</strong><p>${esc(summary)}</p><time>${dt(article.t, { year: 'numeric', month: 'numeric', day: 'numeric' })}</time></span></button><a class="longform-original" href="${esc(article.url)}" target="_blank" rel="noopener noreferrer">${youtube ? 'YouTube 原视频' : '小宇宙原节目'} ↗</a><button class="favorite-button${saved ? ' saved' : ''}" data-favorite="${esc(id)}" aria-label="${saved ? '取消收藏' : '收藏长内容'}" aria-pressed="${saved}">${saved ? '★' : '☆'}</button></article>`;
 }
 function tweetTextMarkup(value) {
   return esc(value || '')
@@ -150,11 +163,11 @@ function tweetCard(article) {
   const summarized = wordCount > 500 && article.displayTitle && article.abstract;
   const source = sourceById(article.bookId) || {};
   const profileUrl = source.profileUrl || `https://x.com/${source.screenName || ''}`;
-  const chineseBody = article.translation || article.title || '这条推文尚未完成中文翻译。';
+  const originalBody = article.text || article.title || '这条推文没有可显示的正文。';
   const mainContent = summarized
     ? `<h4>${esc(article.displayTitle)}</h4><p class="tweet-abstract">${tweetTextMarkup(article.abstract)}</p><span class="tweet-long-label">长文 · ${wordCount} 词 · LLM 摘要</span>`
-    : `<p class="tweet-translation">${tweetTextMarkup(chineseBody)}</p>`;
-  return `<article class="tweet-card"><header><a href="${esc(profileUrl)}" target="_blank" rel="noopener noreferrer"><strong>${esc(article.source)}</strong><span>${source.screenName ? `@${esc(source.screenName)}` : ''}</span></a><time>${dt(article.t, { year: 'numeric', month: 'numeric', day: 'numeric' })}</time></header><div class="tweet-chinese">${mainContent}</div><details class="tweet-original"><summary>查看英文原文</summary><p>${tweetTextMarkup(article.text || article.title)}</p></details><footer><div class="tweet-stats"><span>${Number(article.replyCount) || 0} 回复</span><span>${Number(article.retweetCount) || 0} 转发</span><span>${Number(article.favoriteCount) || 0} 喜欢</span></div><div class="tweet-actions"><a href="${esc(article.url)}" target="_blank" rel="noopener noreferrer">X 原帖 ↗</a><button class="favorite-button${saved ? ' saved' : ''}" data-favorite="${esc(id)}" aria-label="${saved ? '取消收藏' : '收藏推文'}" aria-pressed="${saved}">${saved ? '★' : '☆'}</button><button class="twitter-delete-button" data-delete-twitter="${esc(id)}" aria-label="彻底删除推文" title="从书库和本地归档中彻底删除">−</button></div></footer></article>`;
+    : `<p class="tweet-translation">${tweetTextMarkup(originalBody)}</p>`;
+  return `<article class="tweet-card"><header><a href="${esc(profileUrl)}" target="_blank" rel="noopener noreferrer"><strong>${esc(article.source)}</strong><span>${source.screenName ? `@${esc(source.screenName)}` : ''}</span></a><time>${dt(article.t, { year: 'numeric', month: 'numeric', day: 'numeric' })}</time></header><div class="tweet-chinese">${mainContent}</div><footer><div class="tweet-stats"><span>${Number(article.replyCount) || 0} 回复</span><span>${Number(article.retweetCount) || 0} 转发</span><span>${Number(article.favoriteCount) || 0} 喜欢</span></div><div class="tweet-actions"><a href="${esc(article.url)}" target="_blank" rel="noopener noreferrer">X 原帖 ↗</a><button class="favorite-button${saved ? ' saved' : ''}" data-favorite="${esc(id)}" aria-label="${saved ? '取消收藏' : '收藏推文'}" aria-pressed="${saved}">${saved ? '★' : '☆'}</button><button class="twitter-delete-button" data-delete-twitter="${esc(id)}" aria-label="彻底删除推文" title="从书库和本地归档中彻底删除">−</button></div></footer></article>`;
 }
 function empty(title, note) { return `<section class="empty"><div class="empty-icon">☾</div><h2>${title}</h2><p>${note}</p></section>`; }
 
@@ -181,32 +194,60 @@ function renderTimeline(days, title, description) {
 }
 function cover(source, index) {
   const colors = ['#ef6d54', '#6558d3', '#19917c', '#d9902b', '#b24b6e', '#2b799b'];
-  const label = source.platform === 'twitter' ? '推特' : source.platform === 'youtube' ? 'YouTube' : '公众号';
-  const unit = source.platform === 'youtube' ? '个视频' : source.platform === 'twitter' ? '条推文' : '篇文章';
+  const label = source.platform === 'twitter' ? '推特' : source.platform === 'youtube' ? 'YouTube' : source.platform === 'podcast' ? '小宇宙' : '公众号';
+  const unit = source.platform === 'youtube' ? '个视频' : source.platform === 'podcast' ? '期节目' : source.platform === 'twitter' ? '条推文' : '篇文章';
   return `<div class="book-cover" style="--cover:${colors[index % colors.length]}"><span>${label}</span><strong>${esc(source.name)}</strong><i>${source.items.length} ${unit}</i></div>`;
 }
+function shelfGroups() {
+  const groups = [...(state.management.groups || [])];
+  if (!groups.some((group) => group.id === 'group_podcast')) groups.push({ id: 'group_podcast', name: '小宇宙', order: 4 });
+  const fixedOrder = ['group_macro', 'group_value', 'group_growth', 'group_youtube', 'group_podcast', 'group_twitter'];
+  return groups.sort((a, b) => fixedOrder.indexOf(a.id) - fixedOrder.indexOf(b.id));
+}
 function groupOptions(selectedId) {
-  return (state.management.groups || []).map((group) => `<option value="${esc(group.id)}"${group.id === selectedId ? ' selected' : ''}>${esc(group.name)}</option>`).join('');
+  return shelfGroups().map((group) => `<option value="${esc(group.id)}"${group.id === selectedId ? ' selected' : ''}>${esc(group.name)}</option>`).join('');
 }
 function bookCard(account, sourceMap, index, initialLimit) {
   const source = sourceMap.get(account.bookId) || { ...account, items: [] };
   const ready = source.items.length > 0;
   const moving = state.movingSources.has(account.bookId);
-  const pendingLimit = account.platform === 'youtube' ? (account.initialVideoLimit || 5) : account.platform === 'twitter' ? (account.initialTweetLimit || 10) : initialLimit;
-  const pendingUnit = account.platform === 'youtube' ? '个视频' : account.platform === 'twitter' ? '条推文' : '篇文章';
+  const pendingLimit = account.platform === 'youtube' ? (account.initialVideoLimit || 5) : account.platform === 'podcast' ? (account.initialEpisodeLimit || 3) : account.platform === 'twitter' ? (account.initialTweetLimit || 10) : initialLimit;
+  const pendingUnit = account.platform === 'youtube' ? '个视频' : account.platform === 'podcast' ? '期节目' : account.platform === 'twitter' ? '条推文' : '篇文章';
+  const pendingMessage = account.platform === 'podcast' ? `小宇宙已订阅 · 首次同步将导入最近 ${pendingLimit} ${pendingUnit}` : `首次同步将导入最近 ${pendingLimit} ${pendingUnit}`;
   const twitterControls = account.platform === 'twitter' ? `<div class="book-twitter-controls"><label><span>频率</span><select data-twitter-account-tag="${esc(account.bookId)}" aria-label="设置 ${esc(account.name)} 的 Twitter 频率"><option value="高频"${account.feedTag === '高频' ? ' selected' : ''}>高频 · 2 周</option><option value="低频"${account.feedTag !== '高频' ? ' selected' : ''}>低频 · 2 个月</option></select></label><button data-twitter-account-mute="${esc(account.bookId)}">${account.mutedInFeed ? '恢复信息流' : '屏蔽信息流'}</button></div>` : '';
-  return `<div class="book-entry${ready ? '' : ' pending-initialization'}${moving ? ' moving' : ''}${account.mutedInFeed ? ' muted' : ''}" draggable="true" data-drag-source="${esc(account.bookId)}">${ready ? '' : '<span class="initialization-badge">未完成初始化</span>'}<button class="book" ${ready ? `data-source="${esc(account.bookId)}"` : 'disabled'}>${cover({ ...source, platform: account.platform }, index)}<span class="book-name">${esc(account.name)}</span><span class="book-update">${ready ? `更新至 ${dt(source.items[0]?.t || 0, { year: 'numeric', month: 'numeric', day: 'numeric' })}` : `首次同步将导入最近 ${pendingLimit} ${pendingUnit}`}</span></button><label class="book-group-select"><span>分组</span><select data-move-source="${esc(account.bookId)}" ${moving ? 'disabled' : ''}>${groupOptions(account.groupId)}</select></label>${twitterControls}<button class="book-remove" data-remove="${esc(account.bookId)}" aria-label="停止订阅 ${esc(account.name)}">×</button></div>`;
+  return `<div class="book-entry${ready ? '' : ' pending-initialization'}${moving ? ' moving' : ''}${account.mutedInFeed ? ' muted' : ''}" draggable="true" data-drag-source="${esc(account.bookId)}">${ready ? '' : '<span class="initialization-badge">等待首次同步</span>'}<button class="book" ${ready ? `data-source="${esc(account.bookId)}"` : 'disabled'}>${cover({ ...source, platform: account.platform }, index)}<span class="book-name">${esc(account.name)}</span><span class="book-update">${ready ? `更新至 ${dt(source.items[0]?.t || 0, { year: 'numeric', month: 'numeric', day: 'numeric' })}` : pendingMessage}</span></button><label class="book-group-select"><span>分组</span><select data-move-source="${esc(account.bookId)}" ${moving ? 'disabled' : ''}>${groupOptions(account.groupId)}</select></label>${twitterControls}<button class="book-remove" data-remove="${esc(account.bookId)}" aria-label="停止订阅 ${esc(account.name)}">×</button></div>`;
 }
 function renderShelf() {
   if (state.sourceId) return renderSource();
   const sourceMap = new Map(state.library.sources.map((source) => [source.bookId, source]));
-  const accounts = [...state.management.accounts].sort((a, b) => (b.latestAt || 0) - (a.latestAt || 0));
+  const accounts = state.management.accounts.map((account) => account.platform === 'podcast' ? { ...account, groupId: 'group_podcast' } : account).sort((a, b) => {
+    const aPending = !(sourceMap.get(a.bookId)?.items?.length > 0);
+    const bPending = !(sourceMap.get(b.bookId)?.items?.length > 0);
+    if (aPending !== bPending) return aPending ? -1 : 1;
+    return (b.latestAt || 0) - (a.latestAt || 0);
+  });
   const initialLimit = state.management.settings?.initialArticleLimit || 50;
-  const groups = state.management.groups || [];
+  const groups = shelfGroups();
   const sections = groups.map((group) => ({ id: group.id, name: group.name, accounts: accounts.filter((account) => account.groupId === group.id) }));
   const shelfDirectory = `<aside class="shelf-directory" aria-label="书架目录"><strong>书架目录</strong>${sections.map((section) => `<button data-shelf-jump="${esc(section.id)}"><span>${esc(section.name)}</span><i>${section.accounts.length}</i></button>`).join('')}</aside>`;
   let cardIndex = 0;
-  content.innerHTML = `<section class="shelf-heading"><div><p class="eyebrow">LIBRARY</p><h2>全部书架</h2><p>公众号、Twitter 与 YouTube 的订阅都在这里管理。Twitter 的高低频和信息流屏蔽直接在对应书卡下调整。</p></div><div class="shelf-actions"><button class="secondary-button" data-twitter-refresh${state.management.accounts.some((account) => account.platform === 'twitter') ? '' : ' disabled'}>↻ 同步 Twitter</button><button class="secondary-button" data-youtube-refresh${state.management.accounts.some((account) => account.platform === 'youtube') ? '' : ' disabled'}>↻ 同步 YouTube</button></div></section><div class="shelf-layout">${shelfDirectory}<div class="grouped-shelf">${sections.map((section) => `<section class="shelf-group" id="shelf-${esc(section.id)}" data-shelf-section="${esc(section.id)}" data-group-drop="${esc(section.id)}"><header><h3>${esc(section.name)}</h3><span>${section.accounts.length} 本</span></header><div class="shelf">${section.accounts.length ? section.accounts.map((account) => bookCard(account, sourceMap, cardIndex++, initialLimit)).join('') : '<div class="empty-group">把来源拖到这里</div>'}</div></section>`).join('')}</div></div>`;
+  content.innerHTML = `<section class="shelf-heading"><div><p class="eyebrow">LIBRARY</p><h2>全部书架</h2><p>公众号、Twitter、YouTube 与小宇宙的订阅都在这里管理。Twitter 的高低频和信息流屏蔽直接在对应书卡下调整。</p></div><div class="shelf-actions"><button class="primary-button" data-open-subscription>＋ 增加订阅</button><button class="secondary-button" data-twitter-refresh${state.management.accounts.some((account) => account.platform === 'twitter') ? '' : ' disabled'}>↻ Twitter</button><button class="secondary-button" data-youtube-refresh${state.management.accounts.some((account) => account.platform === 'youtube') ? '' : ' disabled'}>↻ YouTube</button><button class="secondary-button" data-podcast-refresh${state.management.accounts.some((account) => account.platform === 'podcast') ? '' : ' disabled'}>↻ 小宇宙</button></div></section><div class="shelf-layout">${shelfDirectory}<div class="grouped-shelf">${sections.map((section) => `<section class="shelf-group" id="shelf-${esc(section.id)}" data-shelf-section="${esc(section.id)}" data-group-drop="${esc(section.id)}"><header><h3>${esc(section.name)}</h3><span>${section.accounts.length} 本</span></header><div class="shelf">${section.accounts.length ? section.accounts.map((account) => bookCard(account, sourceMap, cardIndex++, initialLimit)).join('') : '<div class="empty-group">把来源拖到这里</div>'}</div></section>`).join('')}</div></div>`;
+}
+
+function selectSubscriptionType(type = 'wechat') {
+  subscriptionDialog.querySelectorAll('[data-subscription-type]').forEach((button) => {
+    const active = button.dataset.subscriptionType === type;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  subscriptionDialog.querySelectorAll('[data-subscription-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.subscriptionPanel !== type;
+  });
+}
+function openSubscriptionDialog(type = 'wechat') {
+  selectSubscriptionType(type);
+  subscriptionDialog.querySelectorAll('.form-note').forEach((note) => { note.textContent = ''; });
+  subscriptionDialog.showModal();
 }
 function dashboardCard(item) {
   let host = '';
@@ -227,13 +268,26 @@ function renderTwitterFeed() {
   const accounts = (state.management.accounts || []).filter((account) => account.platform === 'twitter');
   const tags = twitterFeedTags(accounts);
   if (!tags.includes(state.twitterTagFilter)) state.twitterTagFilter = '低频';
-  const articles = allTwitterArticles();
+  const tagStats = new Map(tags.map((tag) => {
+    const articles = allTwitterArticles({ tag, personId: 'all' });
+    return [tag, { articles, people: new Set(articles.map((article) => article.bookId)) }];
+  }));
+  const availableArticles = tagStats.get(state.twitterTagFilter)?.articles || [];
+  const availablePeople = tagStats.get(state.twitterTagFilter)?.people || new Set();
+  const people = accounts
+    .filter((account) => !account.mutedInFeed && (account.feedTag || '低频') === state.twitterTagFilter && availablePeople.has(account.bookId))
+    .sort((a, b) => String(a.name || a.screenName).localeCompare(String(b.name || b.screenName), 'en'));
+  if (state.twitterPersonFilter !== 'all' && !people.some((account) => account.bookId === state.twitterPersonFilter)) state.twitterPersonFilter = 'all';
+  const articles = state.twitterPersonFilter === 'all' ? availableArticles : availableArticles.filter((article) => article.bookId === state.twitterPersonFilter);
+  const personArticleCounts = new Map();
+  for (const article of availableArticles) personArticleCounts.set(article.bookId, (personArticleCounts.get(article.bookId) || 0) + 1);
   const awaitingReview = allArticles().filter((article) => article.platform === 'twitter' && article.valueDecision !== 'keep').length;
   const authLabel = state.management.sync?.twitterAuthenticated ? '专用 X 登录态已接入。' : '当前使用游客读取。';
   const controls = `<div class="shelf-actions"><button class="secondary-button" data-twitter-refresh${accounts.length ? '' : ' disabled'}>↻ 同步 Twitter</button></div>`;
-  const tagFilters = `<nav class="twitter-tag-filters" aria-label="Twitter Leader 分类">${tags.map((tag) => `<button data-twitter-tag-filter="${esc(tag)}" class="${state.twitterTagFilter === tag ? 'active' : ''}">${esc(tag)} · 最近${tag === '高频' ? '2 周' : '2 个月'}</button>`).join('')}</nav>`;
+  const tagFilters = `<nav class="twitter-tag-filters" aria-label="Twitter Leader 分类">${tags.map((tag) => `<button data-twitter-tag-filter="${esc(tag)}" class="${state.twitterTagFilter === tag ? 'active' : ''}">${esc(tag)} · ${tagStats.get(tag)?.people.size || 0} 人 · 最近${tag === '高频' ? '2 周' : '2 个月'}</button>`).join('')}</nav>`;
+  const personFilter = `<div class="twitter-person-filter"><label for="twitter-person-filter">筛选人物</label><select id="twitter-person-filter" data-twitter-person-filter><option value="all">全部${esc(state.twitterTagFilter)}人物 · ${people.length}</option>${people.map((account) => `<option value="${esc(account.bookId)}"${state.twitterPersonFilter === account.bookId ? ' selected' : ''}>${esc(account.name || `@${account.screenName}`)} · ${personArticleCounts.get(account.bookId) || 0} 条</option>`).join('')}</select></div>`;
   if (!articles.length) {
-    content.innerHTML = `<section class="platform-feed-heading"><div><p class="eyebrow">TWITTER TIMELINE</p><h2>Twitter</h2><p>${authLabel}信息流只显示通过 AI 审核闸门的内容。${awaitingReview ? `现有 ${awaitingReview} 条旧数据等待重新审核。` : ''}</p></div>${controls}</section>${tagFilters}${empty('这个分类暂时没有审核通过的内容', '未审核或被判定为低价值的推文不会进入信息流。')}`;
+    content.innerHTML = `<section class="platform-feed-heading"><div><p class="eyebrow">TWITTER TIMELINE</p><h2>Twitter</h2><p>${authLabel}信息流只显示通过 AI 审核闸门的内容；新推文保留英文原文，不再生成中文译文。${awaitingReview ? `现有 ${awaitingReview} 条旧数据等待重新审核。` : ''}</p></div>${controls}</section>${tagFilters}${personFilter}${empty('这个筛选条件暂时没有审核通过的内容', '可以切换人物或频率分类；未审核、低价值或被屏蔽的推文不会进入信息流。')}`;
     return;
   }
   const visibleCount = Math.min(articles.length, Math.max(TWITTER_PAGE_SIZE, state.twitterVisibleCount || TWITTER_PAGE_SIZE));
@@ -244,16 +298,22 @@ function renderTwitterFeed() {
     days.set(key, [...(days.get(key) || []), article]);
   }
   const remaining = articles.length - visibleCount;
-  content.innerHTML = `<section class="platform-feed-heading"><div><p class="eyebrow">TWITTER TIMELINE</p><h2>Twitter</h2><p>${authLabel}${esc(state.twitterTagFilter)} Leader · 最近 ${state.twitterTagFilter === '高频' ? '2 周' : '2 个月'} · ${articles.length} 条。分类内部仍按原始发布时间倒序；账号分类请在“全部书架”调整。</p></div>${controls}</section>${tagFilters}<div class="timeline twitter-timeline">${[...days.entries()].map(([day, items]) => `<section class="day-group"><h3>${esc(day)}<span>${items.length}</span></h3>${items.map(tweetCard).join('')}</section>`).join('')}</div><button class="twitter-feed-sentinel" data-load-more-twitter${remaining ? '' : ' disabled'}>${remaining ? `继续下滑加载更早推文 · 已显示 ${visibleCount}/${articles.length}` : `已显示全部 ${articles.length} 条推文`}</button>`;
+  const selectedPerson = people.find((account) => account.bookId === state.twitterPersonFilter);
+  content.innerHTML = `<section class="platform-feed-heading"><div><p class="eyebrow">TWITTER TIMELINE</p><h2>Twitter</h2><p>${authLabel}${esc(state.twitterTagFilter)} Leader · 最近 ${state.twitterTagFilter === '高频' ? '2 周' : '2 个月'} · ${selectedPerson ? `${esc(selectedPerson.name)} · ` : ''}${articles.length} 条。按原始发布时间倒序；正文直接展示英文原文，可使用本机翻译。</p></div>${controls}</section>${tagFilters}${personFilter}<div class="timeline twitter-timeline">${[...days.entries()].map(([day, items]) => `<section class="day-group"><h3>${esc(day)}<span>${items.length}</span></h3>${items.map(tweetCard).join('')}</section>`).join('')}</div><button class="twitter-feed-sentinel" data-load-more-twitter${remaining ? '' : ' disabled'}>${remaining ? `继续下滑加载更早推文 · 已显示 ${visibleCount}/${articles.length}` : `已显示全部 ${articles.length} 条推文`}</button>`;
   setupTwitterFeedObserver(articles.length);
 }
-function renderYoutubeFeed() {
-  const accounts = (state.management.accounts || []).filter((account) => account.platform === 'youtube');
-  const articles = allYoutubeArticles();
-  const controls = `<div class="shelf-actions"><button class="secondary-button" data-youtube-refresh${accounts.length ? '' : ' disabled'}>↻ 同步 YouTube</button></div>`;
-  const heading = `<section class="platform-feed-heading"><div><p class="eyebrow">YOUTUBE LIBRARY</p><h2>YouTube</h2><p>以文章目录方式阅读本地字幕。完成归档的视频会把中文译文放在前面、英文 Transcript 放在后面，并保留原视频跳转。</p></div>${controls}</section>`;
+function renderLongformFeed(platform) {
+  const youtube = platform === 'youtube';
+  const accounts = (state.management.accounts || []).filter((account) => account.platform === platform);
+  const articles = allLongformArticles(platform);
+  const controls = youtube
+    ? `<div class="shelf-actions"><button class="secondary-button" data-youtube-refresh${accounts.length ? '' : ' disabled'}>↻ 同步 YouTube</button></div>`
+    : `<div class="shelf-actions"><button class="secondary-button" data-podcast-refresh${accounts.length ? '' : ' disabled'}>↻ 同步小宇宙</button></div>`;
+  const heading = youtube
+    ? `<section class="platform-feed-heading"><div><p class="eyebrow">YOUTUBE LIBRARY</p><h2>YouTube</h2><p>点击标题打开本地文字稿与梗概，右侧按钮跳转 YouTube 原视频。</p></div>${controls}</section>`
+    : `<section class="platform-feed-heading"><div><p class="eyebrow">XIAOYUZHOU LIBRARY</p><h2>小宇宙</h2><p>点击标题打开本地逐字稿与梗概，右侧按钮跳转小宇宙原节目。</p></div>${controls}</section>`;
   if (!articles.length) {
-    content.innerHTML = `${heading}${empty('还没有完成 YouTube 字幕归档', '频道已经订阅；点击“同步 YouTube”后会导入最新视频及可用字幕。')}`;
+    content.innerHTML = `${heading}${empty(youtube ? '还没有 YouTube 文字归档' : '还没有小宇宙逐字稿', youtube ? '添加 YouTube 频道并同步后，文字与梗概会出现在这里。' : '添加小宇宙节目并同步后，逐字稿与梗概会出现在这里。')}`;
     return;
   }
   const days = new Map();
@@ -261,8 +321,10 @@ function renderYoutubeFeed() {
     const key = fullDayKey(article.t);
     days.set(key, [...(days.get(key) || []), article]);
   }
-  content.innerHTML = `${heading}<div class="timeline youtube-timeline">${[...days.entries()].map(([day, items]) => `<section class="day-group"><h3>${esc(day)}<span>${items.length}</span></h3>${items.map(articleRow).join('')}</section>`).join('')}</div>`;
+  content.innerHTML = `${heading}<div class="timeline longform-timeline">${[...days.entries()].map(([day, items]) => `<section class="day-group"><h3>${esc(day)}<span>${items.length}</span></h3>${items.map(longformRow).join('')}</section>`).join('')}</div>`;
 }
+function renderYoutubeFeed() { renderLongformFeed('youtube'); }
+function renderPodcastFeed() { renderLongformFeed('podcast'); }
 function setupTwitterFeedObserver(total) {
   twitterFeedObserver?.disconnect();
   twitterFeedObserver = null;
@@ -280,10 +342,11 @@ function renderSource() {
   const source = sourceById(state.sourceId);
   if (!source) { state.sourceId = null; return renderShelf(); }
   const youtube = source.platform === 'youtube';
+  const podcast = source.platform === 'podcast';
   const twitter = source.platform === 'twitter';
   const visibleItems = twitter ? source.items.filter((item) => item.valueDecision === 'keep') : source.items;
   const articles = [...visibleItems].sort(publishedDesc).map((item) => ({ ...item, source: source.name, bookId: source.bookId, platform: source.platform || 'wechat' }));
-  content.innerHTML = `<button class="back" data-back>← 返回书架</button><section class="source-header"><div class="source-cover">${esc(source.name).slice(0, 1)}</div><div><p class="eyebrow">${youtube ? 'YOUTUBE CHANNEL' : twitter ? 'TWITTER ACCOUNT' : 'PUBLIC ACCOUNT'}</p><h2>${esc(source.name)}</h2><p>完整目录 · ${articles.length} ${youtube ? '个视频' : twitter ? '条推文' : '篇文章'}</p></div></section><section class="catalog">${articles.map(articleRow).join('')}</section>`;
+  content.innerHTML = `<button class="back" data-back>← 返回书架</button><section class="source-header"><div class="source-cover">${esc(source.name).slice(0, 1)}</div><div><p class="eyebrow">${youtube ? 'YOUTUBE CHANNEL' : podcast ? 'XIAOYUZHOU PODCAST' : twitter ? 'TWITTER ACCOUNT' : 'PUBLIC ACCOUNT'}</p><h2>${esc(source.name)}</h2><p>完整目录 · ${articles.length} ${youtube ? '个视频' : podcast ? '期节目' : twitter ? '条推文' : '篇文章'}</p></div></section><section class="catalog">${articles.map(articleRow).join('')}</section>`;
 }
 function renderFavorites() {
   const articles = allArticles().filter((article) => state.favorites.has(articleId(article)));
@@ -331,7 +394,7 @@ function renderReader() {
   const id = articleId(article);
   const saved = state.favorites.has(id);
   const highlights = state.highlights[id] || [];
-  const externalLabel = article.platform === 'youtube' ? 'YouTube 原视频' : article.platform === 'twitter' ? 'X 原帖' : '微信原文';
+  const externalLabel = article.platform === 'youtube' ? 'YouTube 原视频' : article.platform === 'podcast' ? '小宇宙原节目' : article.platform === 'twitter' ? 'X 原帖' : '微信原文';
   content.innerHTML = `<button class="back" data-back>← 返回文章列表</button><button class="reader-floating-back" data-back aria-label="返回文章列表">← <span>文章列表</span></button><article class="reader"><header class="reader-header"><p class="eyebrow">${esc(article.source)}</p><h1>${esc(doc.title || article.title)}</h1><p class="reader-meta">${dt(article.t, { year: 'numeric', month: 'numeric', day: 'numeric' })} · 本地 Markdown</p><div class="reader-actions"><button id="reader-favorite" class="reader-action${saved ? ' saved' : ''}" data-favorite="${esc(id)}">${saved ? '★ 已收藏' : '☆ 收藏'}</button><a class="reader-action" href="${esc(publicArticleUrl(article.url))}" target="_blank" rel="noreferrer">${externalLabel} ↗</a></div></header><div class="reader-layout"><div class="reader-body">${renderMarkdown(doc.markdown, id)}</div><aside class="highlight-panel"><h3>划线</h3><p>用鼠标选中文本，旁边会出现确认按钮。</p>${highlights.length ? `<ol>${highlights.map((item) => `<li>${esc(item.text)}</li>`).join('')}</ol>` : '<span class="highlight-empty">还没有划线</span>'}</aside></div></article><div id="selection-popover" class="selection-popover" hidden><button class="selection-confirm" data-confirm-highlight aria-label="确认划线">✓</button><button class="selection-cancel" data-cancel-highlight aria-label="取消划线">×</button></div>`;
 }
 async function openArticle(article) {
@@ -358,6 +421,7 @@ function render() {
   if (state.tab === 'shelf') renderShelf();
   if (state.tab === 'twitter') renderTwitterFeed();
   if (state.tab === 'youtube') renderYoutubeFeed();
+  if (state.tab === 'podcast') renderPodcastFeed();
   if (state.tab === 'dashboards') renderDashboards();
 }
 function routeUrl(tab = state.tab, sourceId = state.sourceId) {
@@ -367,7 +431,7 @@ function routeFromLocation() {
   const match = location.hash.match(/^#shelf\/(.+)$/);
   if (match) return { tab: 'shelf', sourceId: decodeURIComponent(match[1]) };
   const tab = location.hash.slice(1);
-  return { tab: ['today', 'favorites', 'week', 'shelf', 'twitter', 'youtube', 'dashboards'].includes(tab) ? tab : 'today', sourceId: null };
+  return { tab: ['today', 'favorites', 'week', 'shelf', 'twitter', 'youtube', 'podcast', 'dashboards'].includes(tab) ? tab : 'today', sourceId: null };
 }
 function navigate(tab, sourceId = null, { replace = false } = {}) {
   if (tab === 'twitter' && state.tab !== 'twitter') state.twitterVisibleCount = TWITTER_PAGE_SIZE;
@@ -447,12 +511,25 @@ async function moveSource(sourceId, groupId) {
   }
 }
 async function toggleFavorite(id) {
-  if (state.favorites.has(id)) state.favorites.delete(id); else state.favorites.add(id);
+  const saved = !state.favorites.has(id);
+  const version = (state.favoriteWriteVersions.get(id) || 0) + 1;
+  state.favoriteWriteVersions.set(id, version);
+  if (saved) state.favorites.add(id); else state.favorites.delete(id);
   render();
   try {
-    const response = await fetch('/api/favorites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [...state.favorites] }) });
+    const response = await fetch('/api/favorites/item', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, saved }),
+      keepalive: true,
+    });
     if (!response.ok) throw new Error('save failed');
-  } catch { state.favorites.has(id) ? state.favorites.delete(id) : state.favorites.add(id); render(); notify('收藏暂时无法保存，请稍后重试。', 'error'); }
+  } catch {
+    if (state.favoriteWriteVersions.get(id) !== version) return;
+    if (saved) state.favorites.delete(id); else state.favorites.add(id);
+    render();
+    notify('收藏暂时无法保存，请稍后重试。', 'error');
+  }
 }
 async function deleteTwitterItem(id) {
   const article = articleById(id);
@@ -508,6 +585,7 @@ content.addEventListener('click', async (event) => {
   const remove = event.target.closest('[data-remove]');
   if (twitterTagFilter) {
     state.twitterTagFilter = twitterTagFilter.dataset.twitterTagFilter || '低频';
+    state.twitterPersonFilter = 'all';
     state.twitterVisibleCount = TWITTER_PAGE_SIZE;
     return renderTwitterFeed();
   }
@@ -526,6 +604,7 @@ content.addEventListener('click', async (event) => {
     if (state.reader) { state.reader = null; return render(); }
     if (state.sourceId && Number(history.state?.weReadDepth) > 0) return history.back();
     if (state.sourceId) return navigate('shelf', null, { replace: true });
+    return render();
   }
   if (localArticle) return openArticle(articleById(localArticle.dataset.localArticle));
   if (deleteTwitter) return deleteTwitterItem(deleteTwitter.dataset.deleteTwitter);
@@ -550,24 +629,29 @@ content.addEventListener('click', async (event) => {
     const popover = document.querySelector('#selection-popover'); if (popover) popover.hidden = true;
     return;
   }
-  if (event.target.closest('[data-open-subscribe]')) return subscribeDialog.showModal();
-  if (event.target.closest('[data-open-youtube]')) return youtubeDialog.showModal();
-  if (event.target.closest('[data-open-twitter]')) return twitterDialog.showModal();
+  if (event.target.closest('[data-open-subscription]')) return openSubscriptionDialog(event.target.closest('[data-open-subscription]').dataset.openSubscription || 'wechat');
   if (event.target.closest('[data-open-dashboard]')) return dashboardDialog.showModal();
   if (event.target.closest('[data-youtube-refresh]')) return startYoutubeRefresh();
+  if (event.target.closest('[data-podcast-refresh]')) return startPodcastRefresh();
   if (event.target.closest('[data-twitter-refresh]')) return startTwitterRefresh();
   if (remove) {
     const account = state.management.accounts.find((item) => item.bookId === remove.dataset.remove);
     if (!account) return;
     state.pendingRemoval = account;
     document.querySelector('#remove-title').textContent = `停止订阅「${account.name}」？`;
-    document.querySelector('#remove-note').textContent = account.platform === 'youtube' ? '停止后不会再同步这个 YouTube 频道。已保存的字幕 Markdown 会默认保留。' : account.platform === 'twitter' ? '停止后不会再同步这个 Twitter 账号。已保存的推文 Markdown 会默认保留。' : '停止后不会再拉取这个公众号。已下载的本地文章会默认保留。';
-    document.querySelector('#remove-archive-label').textContent = account.platform === 'youtube' ? '同时删除该频道已保存的字幕 Markdown' : account.platform === 'twitter' ? '同时删除该账号已保存的推文 Markdown' : '同时删除该公众号已下载的本地 Markdown 和图片';
+    document.querySelector('#remove-note').textContent = account.platform === 'youtube' ? '停止后不会再同步这个 YouTube 频道。已保存的字幕 Markdown 会默认保留。' : account.platform === 'podcast' ? '停止后不会再同步这个小宇宙节目。已保存的逐字稿会默认保留。' : account.platform === 'twitter' ? '停止后不会再同步这个 Twitter 账号。已保存的推文 Markdown 会默认保留。' : '停止后不会再拉取这个公众号。已下载的本地文章会默认保留。';
+    document.querySelector('#remove-archive-label').textContent = account.platform === 'youtube' ? '同时删除该频道已保存的字幕 Markdown' : account.platform === 'podcast' ? '同时删除该节目已保存的逐字稿 Markdown' : account.platform === 'twitter' ? '同时删除该账号已保存的推文 Markdown' : '同时删除该公众号已下载的本地 Markdown 和图片';
     document.querySelector('#remove-archive').checked = false;
     removeDialog.showModal();
   }
 });
 content.addEventListener('change', (event) => {
+  const twitterPerson = event.target.closest('[data-twitter-person-filter]');
+  if (twitterPerson) {
+    state.twitterPersonFilter = twitterPerson.value || 'all';
+    state.twitterVisibleCount = TWITTER_PAGE_SIZE;
+    return renderTwitterFeed();
+  }
   const twitterTag = event.target.closest('[data-twitter-account-tag]');
   if (twitterTag) return updateTwitterPreferences(twitterTag.dataset.twitterAccountTag, { feedTag: twitterTag.value });
   const select = event.target.closest('[data-move-source]');
@@ -634,6 +718,15 @@ async function startYoutubeRefresh() {
   render();
   notify('已开始检查 YouTube 更新；字幕请求会按安全间隔执行。');
 }
+async function startPodcastRefresh() {
+  const response = await fetch('/api/podcast/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const payload = await response.json();
+  if (!response.ok) return notify(payload.error || '无法开始小宇宙同步', 'error');
+  state.management.job = payload.job;
+  updateHeader();
+  render();
+  notify('已开始检查小宇宙更新；音频会在本机转录并生成梗概。');
+}
 async function startTwitterRefresh() {
   const response = await fetch('/api/twitter/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   const payload = await response.json();
@@ -662,7 +755,7 @@ async function autoRefreshTwitterOnOpen() {
       state.management.job = payload.job;
       updateHeader();
       render();
-      notify('已自动检查 Twitter 更新；新推文会翻译并保存到本地。');
+      notify('已自动检查 Twitter 更新；通过审核的新推文会以英文原文保存到本地。');
     }
   } catch { /* 打开页面时的自动检查不阻塞书库使用。 */ }
 }
@@ -676,6 +769,7 @@ document.querySelector('#settings-button').addEventListener('click', () => {
 });
 document.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
 document.querySelectorAll('[data-close-dialog]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
+subscriptionDialog.querySelectorAll('[data-subscription-type]').forEach((button) => button.addEventListener('click', () => selectSubscriptionType(button.dataset.subscriptionType)));
 document.querySelector('#remove-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const account = state.pendingRemoval;
@@ -701,7 +795,7 @@ document.querySelector('#subscribe-form').addEventListener('submit', async (even
     const response = await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: document.querySelector('#article-url').value }) });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '订阅失败');
-    await loadData(); render(); subscribeDialog.close(); event.currentTarget.reset(); notify(`已添加「${payload.name}」，下次刷新将导入文章。`, 'success');
+    await loadData(); render(); subscriptionDialog.close(); event.currentTarget.reset(); notify(`已添加「${payload.name}」，下次刷新将导入文章。`, 'success');
   } catch (error) { note.textContent = error.message; }
   finally { button.disabled = false; }
 });
@@ -721,7 +815,7 @@ document.querySelector('#youtube-form').addEventListener('submit', async (event)
     if (!response.ok) throw new Error(payload.error || 'YouTube 订阅失败');
     await loadData();
     render();
-    youtubeDialog.close();
+    subscriptionDialog.close();
     event.currentTarget.reset();
     document.querySelector('#youtube-initial-limit').value = 5;
     notify(`已添加「${payload.channel.name}」，点击“同步 YouTube”导入视频与字幕。`, 'success');
@@ -744,10 +838,33 @@ document.querySelector('#twitter-form').addEventListener('submit', async (event)
     if (!response.ok) throw new Error(payload.error || 'Twitter 订阅失败');
     await loadData();
     render();
-    twitterDialog.close();
+    subscriptionDialog.close();
     event.currentTarget.reset();
     document.querySelector('#twitter-initial-limit').value = 10;
     notify(`已添加「${payload.account.name}」，点击“同步 Twitter”导入公开推文。`, 'success');
+  } catch (error) { note.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+document.querySelector('#podcast-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('.primary-button');
+  const note = document.querySelector('#podcast-note');
+  button.disabled = true;
+  note.textContent = '正在解析小宇宙节目…';
+  try {
+    const response = await fetch('/api/podcast/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: document.querySelector('#podcast-url').value, initialLimit: Number(document.querySelector('#podcast-initial-limit').value) }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '小宇宙订阅失败');
+    await loadData();
+    render();
+    subscriptionDialog.close();
+    event.currentTarget.reset();
+    document.querySelector('#podcast-initial-limit').value = 3;
+    notify(`已添加「${payload.podcast.name}」，点击“同步小宇宙”导入单集文字。`, 'success');
   } catch (error) { note.textContent = error.message; }
   finally { button.disabled = false; }
 });

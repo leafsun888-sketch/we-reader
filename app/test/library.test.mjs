@@ -16,8 +16,9 @@ test('Second Brain 多来源书库可供阅读器加载', { skip: !fs.existsSync
     for (const item of source.items) {
       assert.ok(item.title);
       if (source.platform === 'youtube') assert.match(item.url, /^https:\/\/(?:www\.)?youtube\.com\/watch\?/);
+      else if (source.platform === 'podcast') assert.match(item.url, /^https:\/\/(?:www\.)?xiaoyuzhoufm\.com\/episode\/[A-Za-z0-9]+$/);
       else if (source.platform === 'twitter') assert.match(item.url, /^https:\/\/x\.com\/[A-Za-z0-9_]+\/status\/\d+$/);
-      else assert.match(item.url, /^https:\/\/mp\.weixin\.qq\.com\/s\//);
+      else assert.match(item.url, /^https:\/\/mp\.weixin\.qq\.com\/s(?:\/|\?)/);
       assert.equal(typeof item.t, 'number');
     }
     if (source.platform === 'twitter') {

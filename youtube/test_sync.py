@@ -50,7 +50,7 @@ class YoutubeSyncTests(unittest.TestCase):
             sync.write_json(path, {"hello": "世界"})
             self.assertEqual(sync.read_json(path, {}), {"hello": "世界"})
 
-    def test_transcript_markdown_is_chinese_then_english(self):
+    def test_transcript_markdown_is_contextual_chinese_then_english(self):
         channel = {
             "name": "Demo", "channelId": "UC1234567890123456789012",
             "url": "https://www.youtube.com/@demo",
@@ -63,11 +63,15 @@ class YoutubeSyncTests(unittest.TestCase):
         segments = [{"id": "segment-0", "start": 12, "text": "English source."}]
         markdown = sync.transcript_markdown(
             channel, video, segments,
-            {"title": "中文标题", "segment-0": "中文译文。"},
-            "en", True, sync.TERRA_PROVIDER,
+            {"title": "中文标题", "paragraphs": [{"start": 12, "sourceIds": ["segment-0"], "text": "这是结合全文整理的中文逐字文稿。"}]},
+            "en", True, sync.MANUSCRIPT_PROVIDER,
+            "这是一段介绍核心内容的中文梗概。", sync.SUMMARY_PROVIDER,
         )
-        self.assertLess(markdown.index("## 中文译文"), markdown.index("## English Transcript"))
-        self.assertIn("[00:12](https://www.youtube.com/watch?v=abcdefghijk&t=12s) 中文译文。", markdown)
+        self.assertIn("## 内容梗概", markdown)
+        self.assertIn("这是一段介绍核心内容的中文梗概。", markdown)
+        self.assertLess(markdown.index("## 中文逐字文稿"), markdown.index("## English Transcript"))
+        self.assertIn("[00:12](https://www.youtube.com/watch?v=abcdefghijk&t=12s) 这是结合全文整理的中文逐字文稿。", markdown)
+        self.assertIn('transcript_format: "contextual-v1"', markdown)
         self.assertIn("English source.", markdown)
 
     def test_caption_snippets_are_coalesced_without_losing_text(self):
@@ -100,22 +104,18 @@ translation_provider: \"terra\"
         self.assertIn('transcript_format: "readable-v3"', formatted)
         self.assertEqual(formatted, sync.reflow_markdown_text(formatted))
 
-    def test_google_fallback_chunks_preserve_long_text(self):
-        value = "A complete sentence. " * 200
-        chunks = sync.translation_chunks(value, limit=120)
-        self.assertGreater(len(chunks), 1)
-        self.assertEqual("".join(chunks).replace(" ", ""), value.strip().replace(" ", ""))
+    def test_english_transcript_segments_keep_timestamps_and_continuations(self):
+        markdown = """## English Transcript
 
-    def test_partial_terra_result_retries_only_missing_entries(self):
-        entries = [
-            {"id": "one", "text": "First"},
-            {"id": "two", "text": "Second"},
-        ]
-        with patch.object(sync, "translate_with_terra", side_effect=[{"one": "第一"}, {"two": "第二"}]) as terra:
-            translations, providers = sync.translate_entries(entries)
-        self.assertEqual(translations, {"one": "第一", "two": "第二"})
-        self.assertEqual(set(providers.values()), {sync.TERRA_PROVIDER})
-        self.assertEqual(terra.call_count, 2)
+[00:12](https://youtube.test/watch?v=1&t=12s) First sentence.
+
+Continuation of the same source segment.
+
+[01:05](https://youtube.test/watch?v=1&t=65s) Second segment.
+"""
+        segments = sync.english_segments_from_markdown(markdown)
+        self.assertEqual([item["start"] for item in segments], [12, 12, 65])
+        self.assertIn("Continuation", segments[1]["text"])
 
     def test_interrupted_initial_sync_does_not_append_another_batch(self):
         channel = {
@@ -141,7 +141,7 @@ translation_provider: \"terra\"
                 return {
                     "sourceId": current_channel["sourceId"], "title": "中文 " + video["title"],
                     "originalTitle": video["title"], "url": video["url"],
-                    "markdown": "文章/YouTube/demo.md", "translationProvider": sync.TERRA_PROVIDER,
+                    "markdown": "文章/YouTube/demo.md", "manuscriptProvider": sync.MANUSCRIPT_PROVIDER,
                 }
 
             with patch.object(sync, "discover", return_value=videos), patch.object(sync, "archive_transcript", side_effect=archive):
